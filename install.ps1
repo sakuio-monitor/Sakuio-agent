@@ -13,7 +13,7 @@
 #                 [-IncludeMountpoints "C:\,D:\"] [-MonthlyResetDay DAY]
 #   .\install.ps1 -Uninstall [-ServiceName NAME] [-InstallDir DIR]
 #
-# 服务用 nssm 包装（与 Komari 一致）：agent 本身不实现 Windows 服务控制协议（SCM），
+# 服务用 nssm 包装：agent 本身不实现 Windows 服务控制协议（SCM），
 # 裸 New-Service 注册的 exe 无法通过 Start-Service 启动；nssm 自己对接 SCM 并守护子进程。
 
 param(
