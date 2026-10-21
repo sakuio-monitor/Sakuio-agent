@@ -49,7 +49,7 @@ fn detect_by_cpuid() -> String {
         }
         let vendor = cpuid
             .get_hypervisor_info()
-            .map(|hv| hv.as_str().to_lowercase())
+            .map(|hv| format!("{:?}", hv.identify()).to_lowercase())
             .unwrap_or_default();
         return map_hypervisor_vendor(&vendor);
     }

@@ -101,7 +101,7 @@ mod darwin {
     unsafe fn sysctl_value<T>(name: &CStr, out: &mut T) -> bool {
         let mut len = size_of::<T>();
         // SAFETY: raw sysctl query; caller guarantees `out` is a valid `T`.
-        unsafe {
+        let ok = unsafe {
             libc::sysctlbyname(
                 name.as_ptr(),
                 out as *mut T as *mut libc::c_void,
@@ -109,7 +109,8 @@ mod darwin {
                 std::ptr::null_mut(),
                 0,
             ) == 0
-        } && len == size_of::<T>()
+        };
+        ok && len == size_of::<T>()
     }
 
     /// Same accounting as gopsutil `mem.VirtualMemory()` on darwin.
