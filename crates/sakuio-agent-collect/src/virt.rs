@@ -59,6 +59,9 @@ fn detect_by_cpuid() -> String {
     }
 }
 
+// Only reachable from the x86/x86_64 `detect_by_cpuid` branch.
+// 仅 x86/x86_64 的 `detect_by_cpuid` 分支调用，随平台条件编译。
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn map_hypervisor_vendor(vendor: &str) -> String {
     const MAP: &[(&str, &[&str])] = &[
         ("kvm", &["kvm"]),

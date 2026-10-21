@@ -224,6 +224,7 @@ fn gopsutil_available() -> UsageReport {
 }
 
 /// Same as reference agent `CallFree()` (`free -b` on Linux/FreeBSD).
+#[allow(dead_code)]
 pub fn call_free() -> UsageReport {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {

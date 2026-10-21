@@ -66,7 +66,10 @@ fn read_cpu_name_from_proc() -> Option<String> {
     None
 }
 
+// Fallback stub keeps the call site (Linux-only) compiling on all targets.
+// 保留的空实现：调用点仅在 Linux 分支，此桩保证跨平台编译。
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 fn read_cpu_name_from_proc() -> Option<String> {
     None
 }
