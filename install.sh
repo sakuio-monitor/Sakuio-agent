@@ -3,7 +3,7 @@
 # Sakuio agent 一键安装脚本。
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio-agent/refs/heads/main/install.sh \
+#   curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio-agent/main/install.sh \
 #     | sudo bash -s -- -e wss://panel.example.com/api/agent/link -t <node-token> [options...]
 #
 # Options:
