@@ -1,7 +1,10 @@
 use crate::config::CollectConfig;
+#[cfg(any(target_os = "macos", target_os = "freebsd"))]
 use std::process::Command;
 
-pub fn process_count(_cfg: &CollectConfig) -> i32 {
+pub fn process_count(cfg: &CollectConfig) -> i32 {
+    #[cfg(not(target_os = "linux"))]
+    let _ = cfg;
     #[cfg(target_os = "linux")]
     {
         return process_count_linux(cfg);

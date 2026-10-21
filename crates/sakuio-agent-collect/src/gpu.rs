@@ -233,19 +233,17 @@ mod platform_impl {
                 }
             }
             let mapped = match driver {
-                "vc4" | "vc4-drm" => "Broadcom VideoCore IV/VI (Raspberry Pi)",
-                "v3d" | "v3d-drm" => "Broadcom V3D (Raspberry Pi 4/5)",
-                "msm" | "msm_drm" => "Qualcomm Adreno (Unknown Model)",
-                "panfrost" => "ARM Mali (Panfrost)",
-                "lima" => "ARM Mali (Lima)",
-                "sun4i-drm" | "sunxi-drm" => "Allwinner Display Engine",
-                "tegra" => "NVIDIA Tegra",
-                "ast" => "ASPEED Technology, Inc. ASPEED Graphics Family",
-                "i915" | "i915-drm" => "Intel Integrated Graphics",
-                "mgag200" => "Matrox G200 Series",
-                _ if !driver.is_empty() => {
-                    format!("Direct Render Manager {driver}")
-                }
+                "vc4" | "vc4-drm" => std::borrow::Cow::<str>::Borrowed("Broadcom VideoCore IV/VI (Raspberry Pi)"),
+                "v3d" | "v3d-drm" => std::borrow::Cow::<str>::Borrowed("Broadcom V3D (Raspberry Pi 4/5)"),
+                "msm" | "msm_drm" => std::borrow::Cow::<str>::Borrowed("Qualcomm Adreno (Unknown Model)"),
+                "panfrost" => std::borrow::Cow::<str>::Borrowed("ARM Mali (Panfrost)"),
+                "lima" => std::borrow::Cow::<str>::Borrowed("ARM Mali (Lima)"),
+                "sun4i-drm" | "sunxi-drm" => std::borrow::Cow::<str>::Borrowed("Allwinner Display Engine"),
+                "tegra" => std::borrow::Cow::<str>::Borrowed("NVIDIA Tegra"),
+                "ast" => std::borrow::Cow::<str>::Borrowed("ASPEED Technology, Inc. ASPEED Graphics Family"),
+                "i915" | "i915-drm" => std::borrow::Cow::<str>::Borrowed("Intel Integrated Graphics"),
+                "mgag200" => std::borrow::Cow::<str>::Borrowed("Matrox G200 Series"),
+                _ if !driver.is_empty() => std::borrow::Cow::Owned(format!("Direct Render Manager {driver}")),
                 _ => continue,
             };
             result.push(mapped.to_string());
@@ -365,7 +363,7 @@ mod platform_impl {
             .map(|c| {
                 let mut name = c.name;
                 if name.is_empty() || name == "None" {
-                    name = fallback.clone();
+                    name = fallback.clone().unwrap_or_default();
                 }
                 if name.is_empty() || name == "None" {
                     name = "AMD GPU".into();
@@ -439,14 +437,6 @@ mod platform_impl {
         } else {
             Ok(cards)
         }
-    }
-
-    fn is_drm_card_path(path: &std::path::Path) -> bool {
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .is_some_and(|s| {
-                s.starts_with("card") && !s.contains('-') && s.chars().skip(4).all(|c| c.is_ascii_digit())
-            })
     }
 
     fn read_amd_name(device_dir: &std::path::Path) -> String {

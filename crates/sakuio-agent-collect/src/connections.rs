@@ -1,7 +1,9 @@
 use crate::config::CollectConfig;
 use sakuio_protocol::ConnectionsReport;
 
-pub fn connections_count(_cfg: &CollectConfig) -> Result<ConnectionsReport, String> {
+pub fn connections_count(cfg: &CollectConfig) -> Result<ConnectionsReport, String> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = cfg;
     #[cfg(target_os = "linux")]
     {
         match proc_net_count(cfg) {
