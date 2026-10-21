@@ -33,9 +33,8 @@ jobs:
           - { os: ubuntu-24.04, target: armv7-unknown-linux-gnueabihf, asset: sakuio-agent-linux-arm, zig: true }
           - { os: ubuntu-24.04, target: loongarch64-unknown-linux-gnu, asset: sakuio-agent-linux-loong64, zig: true }
           - { os: ubuntu-24.04, target: riscv64gc-unknown-linux-gnu, asset: sakuio-agent-linux-riscv64, zig: true }
-          # ---- Linux MIPS（zig 不支持 MIPS；Rust ≥1.86 已移除 mips std，钉 1.85 工具链）----
-          - { os: ubuntu-24.04, target: mips-unknown-linux-musl, asset: sakuio-agent-linux-mips, zig: false, toolchain: "1.85.0" }
-          - { os: ubuntu-24.04, target: mipsel-unknown-linux-musl, asset: sakuio-agent-linux-mipsel, zig: false, toolchain: "1.85.0" }
+          # MIPS：Rust 上游已移除 mips 预编译 std（新版 rustup 对旧通道也拒绝下载），
+          # 且 zig 不支持 MIPS，暂不提供，见 docs/CICD.md。
           # ---- macOS（原生工具链交叉两个架构）----
           - { os: macos-14, target: aarch64-apple-darwin, asset: sakuio-agent-darwin-arm64, zig: false }
           - { os: macos-14, target: x86_64-apple-darwin, asset: sakuio-agent-darwin-amd64, zig: false }
@@ -68,7 +67,7 @@ jobs:
         uses: mlugg/setup-zig@v1
         with:
           # 0.17 仍是预发布版，各镜像均无正式包；锁定最后一个正式版
-          zig-version: 0.14.1
+          version: 0.14.1
 
       - name: Install cargo-zigbuild
         if: matrix.zig
