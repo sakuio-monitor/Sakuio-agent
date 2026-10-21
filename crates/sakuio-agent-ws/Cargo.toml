@@ -1,0 +1,18 @@
+[package]
+name = "sakuio-agent-ws"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+cbor4ii.workspace = true
+futures-util.workspace = true
+sakuio-board.workspace = true
+sakuio-protocol.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+url.workspace = true
+http = "1"

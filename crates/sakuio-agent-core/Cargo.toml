@@ -1,0 +1,17 @@
+[package]
+name = "sakuio-agent-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+cbor4ii.workspace = true
+sakuio-agent-collect = { path = "../sakuio-agent-collect" }
+sakuio-agent-remote = { path = "../sakuio-agent-remote" }
+sakuio-board.workspace = true
+sakuio-protocol.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true

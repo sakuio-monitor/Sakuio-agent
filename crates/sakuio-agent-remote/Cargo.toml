@@ -1,0 +1,20 @@
+[package]
+name = "sakuio-agent-remote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+sakuio-protocol = { workspace = true }
+
+portable-pty = "0.8"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

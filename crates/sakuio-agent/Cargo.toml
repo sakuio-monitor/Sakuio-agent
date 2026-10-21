@@ -1,0 +1,18 @@
+[package]
+name = "sakuio-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sakuio-agent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+sakuio-agent-core = { path = "../sakuio-agent-core" }
+sakuio-agent-ws = { path = "../sakuio-agent-ws" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
