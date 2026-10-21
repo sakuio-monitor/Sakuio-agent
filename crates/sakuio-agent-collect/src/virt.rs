@@ -19,22 +19,27 @@ static LXC: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)/lxc/[^/]+$").unwrap());
 static CRIO: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)/crio-[0-9a-f]{12,64}\.scope$").unwrap());
 
 pub fn virtualized() -> String {
+    // Windows: CPUID only (systemd-detect-virt does not exist there).
+    // Windows 仅走 CPUID（systemd-detect-virt 不存在）。
     #[cfg(windows)]
     {
         return detect_by_cpuid();
     }
-    if let Ok(out) = Command::new("systemd-detect-virt").output() {
-        if out.status.success() {
-            let virt = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !virt.is_empty() {
-                return virt;
+    #[cfg(not(windows))]
+    {
+        if let Ok(out) = Command::new("systemd-detect-virt").output() {
+            if out.status.success() {
+                let virt = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !virt.is_empty() {
+                    return virt;
+                }
             }
         }
+        if let Some(ct) = detect_container() {
+            return ct;
+        }
+        detect_by_cpuid()
     }
-    if let Some(ct) = detect_container() {
-        return ct;
-    }
-    detect_by_cpuid()
 }
 
 fn detect_by_cpuid() -> String {

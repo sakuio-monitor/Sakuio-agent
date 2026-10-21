@@ -6,10 +6,10 @@ mod connections;
 mod cpu;
 mod disk;
 mod gpu;
-// Referenced only by the Linux GPU backend (`gpu::platform_impl`); excluded
-// on other platforms to avoid dead-code warnings.
-// 仅 Linux GPU 后端（`gpu::platform_impl`）引用；其他平台排除编译。
-#[cfg(target_os = "linux")]
+// Referenced by the Linux GPU backend and the Windows GPU backend
+// (system_profiler covers macOS); excluded elsewhere to avoid dead-code warnings.
+// Linux 与 Windows 的 GPU 后端都引用（macOS 走 system_profiler）；其余平台排除编译。
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod nvidia_smi;
 mod ip;
 mod load;

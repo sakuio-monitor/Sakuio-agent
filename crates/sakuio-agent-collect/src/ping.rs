@@ -1,4 +1,5 @@
 use std::net::{TcpStream, ToSocketAddrs};
+#[cfg(unix)]
 use std::process::Command;
 use std::time::{Duration, Instant};
 
