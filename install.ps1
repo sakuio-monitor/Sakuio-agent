@@ -1,169 +1,315 @@
-# Sakuio Agent Windows installer.
-#
-# One-liner (PowerShell):
-#   powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
-#     "iwr 'https://raw.githubusercontent.com/sakuio-monitor/Sakuio-agent/main/install.ps1' -UseBasicParsing -OutFile 'install.ps1'; & '.\install.ps1' -e <endpoint> -t <token>"
-#
-# Usage:
-#   .\install.ps1 -e <endpoint> -t <token> [-i <interval>]
-#   .\install.ps1 [-Version V] [-InstallDir DIR] [-ServiceName NAME]
-#                 [-DisableRemoteControl] [-DisableAutoUpdate] [-Insecure]
-#                 [-IncludeBufferMemory] [-IpFromNic] [-GpuDetail]
-#                 [-IncludeNics "eth0,eth1"] [-ExcludeNics "docker0"]
-#                 [-IncludeMountpoints "C:\,D:\"] [-MonthlyResetDay DAY]
-#   .\install.ps1 -Uninstall [-ServiceName NAME] [-InstallDir DIR]
-#
-# 服务用 nssm 包装：agent 本身不实现 Windows 服务控制协议（SCM），
-# 裸 New-Service 注册的 exe 无法通过 Start-Service 启动；nssm 自己对接 SCM 并守护子进程。
+# Windows PowerShell installation script for Sakuio Agent
 
-param(
-    [Alias("e")]
-    [string]$Endpoint,
-    [Alias("t")]
-    [string]$Token,
-    [Alias("i")]
-    [string]$Interval,
-    [string]$Version,
-    [string]$GithubProxy,
-    [string]$InstallDir,
-    [string]$ServiceName,
-    [string]$IncludeNics,
-    [string]$ExcludeNics,
-    [string]$IncludeMountpoints,
-    [string]$MonthlyResetDay,
-    [switch]$DisableRemoteControl,
-    [switch]$DisableAutoUpdate,
-    [switch]$Insecure,
-    [switch]$IncludeBufferMemory,
-    [switch]$IpFromNic,
-    [switch]$GpuDetail,
-    [switch]$Uninstall
-)
+# Logging functions with colors
+function Log-Info { param([string]$Message) Write-Host "$Message" -ForegroundColor Cyan }
+function Log-Success { param([string]$Message) Write-Host "$Message" -ForegroundColor Green }
+function Log-Warning { param([string]$Message) Write-Host "[WARNING] $Message" -ForegroundColor Yellow }
+function Log-Error { param([string]$Message) Write-Host "[ERROR] $Message" -ForegroundColor Red }
+function Log-Step { param([string]$Message) Write-Host "$Message" -ForegroundColor Magenta }
+function Log-Config { param([string]$Message) Write-Host "- $Message" -ForegroundColor White }
 
-$ErrorActionPreference = "Stop"
+# Default parameters
+$InstallDir = Join-Path $Env:ProgramFiles "sakuio-agent"
+$ServiceName = "sakuio-agent"
+$GitHubProxy = ""
+$AgentArgs = @()
+$InstallVersion = ""
+$UninstallOnly = $false
 
-$Repo = "sakuio-monitor/Sakuio-agent"
-$DefaultDir = "$env:ProgramFiles\sakuio-agent"
-$DefaultService = "sakuio-agent"
+# Parse script arguments
+for ($i = 0; $i -lt $args.Count; $i++) {
+    switch ($args[$i]) {
+        "--install-dir" { $InstallDir = $args[$i + 1]; $i++; continue }
+        "--install-service-name" { $ServiceName = $args[$i + 1]; $i++; continue }
+        "--install-ghproxy" { $GitHubProxy = $args[$i + 1]; $i++; continue }
+        "--install-version" { $InstallVersion = $args[$i + 1]; $i++; continue }
+        "--uninstall" { $UninstallOnly = $true; continue }
+        Default { $AgentArgs += $args[$i] }
+    }
+}
 
-if (-not $InstallDir) { $InstallDir = $DefaultDir }
-if (-not $ServiceName) { $ServiceName = $DefaultService }
+# Quote a value the way the Windows C runtime command-line parser expects,
+# so arguments survive command-line re-quoting boundaries (Start-Process
+# -ArgumentList, powershell -File, cmd /c, ...) even when they contain
+# spaces such as C:\Users\John Doe\...
+function ConvertTo-CommandLineArg {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
+    if ($Value -notmatch '[\s"]') { return $Value }
+    $escaped = $Value -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1'
+    return '"' + $escaped + '"'
+}
 
-$NssmExe = Join-Path $InstallDir "nssm.exe"
+# Ensure running as Administrator. Instead of failing, re-launch this script
+# elevated and re-quote its own arguments: wrappers that elevate externally
+# (Start-Process and friends) regularly split arguments of paths containing
+# spaces, which breaks installs for user names with spaces.
+if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
+    ).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
+    if ([string]::IsNullOrEmpty($PSCommandPath)) {
+        Log-Error "Cannot elevate a script that was not run from a file. Save it as install.ps1 and run it again as Administrator."
+        exit 1
+    }
+    Log-Warning "Administrator privileges are required. Requesting elevation, please accept the UAC prompt..."
+    $hostExe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    $relaunchArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (ConvertTo-CommandLineArg $PSCommandPath))
+    foreach ($a in $args) {
+        $relaunchArgs += ConvertTo-CommandLineArg ([string]$a)
+    }
+    try {
+        $elevated = Start-Process -FilePath $hostExe -Verb RunAs -Wait -PassThru -ArgumentList ($relaunchArgs -join ' ')
+        exit $elevated.ExitCode
+    }
+    catch {
+        Log-Error "Elevation failed or was cancelled: $_"
+        Log-Error "Please run this script as Administrator."
+        exit 1
+    }
+}
 
-function Invoke-Uninstall {
-    if (Test-Path $NssmExe) { & $NssmExe stop $ServiceName 2>$null | Out-Null }
-    & $NssmExe remove $ServiceName confirm 2>$null | Out-Null
+# Prepare GitHub proxy display
+if ($GitHubProxy -ne '') { $ProxyDisplay = $GitHubProxy } else { $ProxyDisplay = '(direct)' }
+
+# Detect architecture early for constructing binary name
+switch ($env:PROCESSOR_ARCHITECTURE) {
+    'AMD64' { $arch = 'amd64' }
+    'ARM64' { $arch = 'arm64' }
+    'x86' { $arch = '386' }
+    Default { Log-Error "Unsupported architecture: $env:PROCESSOR_ARCHITECTURE"; exit 1 }
+}
+
+# Ensure installation directory exists for nssm and agent
+New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+
+# Check for nssm and download if not present
+$nssmExeToUse = Join-Path $InstallDir "nssm.exe"
+
+# First, check if nssm is in PATH and is functional
+$nssmCmd = Get-Command nssm -ErrorAction SilentlyContinue
+if ($nssmCmd) {
+    Log-Info "nssm found in PATH at $($nssmCmd.Source)."
+    try {
+        $nssmVersionOutput = nssm version 2>&1
+        Log-Info "Detected nssm version: $nssmVersionOutput"
+    }
+    catch {
+        Log-Warning "nssm found in PATH failed to execute 'nssm version'. Will attempt to use/download local copy. Error: $_"
+        $nssmCmd = $null # Force re-evaluation for local copy or download
+    }
+}
+
+# If nssm not found in PATH or the one in PATH failed, check local $InstallDir
+if (-not $nssmCmd) {
+    if (Test-Path $nssmExeToUse) {
+        Log-Info "nssm found at $nssmExeToUse. Attempting to use it by adding $InstallDir to PATH."
+        $env:Path = "$($InstallDir);$($env:Path)"
+        $nssmCmd = Get-Command nssm -ErrorAction SilentlyContinue
+        if ($nssmCmd) {
+            try {
+                $nssmVersionOutput = nssm version 2>&1
+                Log-Info "Detected nssm version: $nssmVersionOutput"
+            }
+            catch {
+                Log-Warning "Failed to make nssm from $nssmExeToUse available via PATH. Will attempt download. Error: $_"
+                $nssmCmd = $null # Mark as unusable
+            }
+        }
+        else {
+            Log-Warning "Failed to make nssm from $nssmExeToUse available via PATH. Will attempt download."
+        }
+    }
+}
+
+# If still no usable nssm command, proceed to download
+if (-not $nssmCmd) {
+    Log-Info "nssm not found or not usable. Attempting to download to $InstallDir..."
+    $NssmVersion = "2.24"
+    $NssmZipUrl = "https://nssm.cc/release/nssm-$NssmVersion.zip"
+    $TempNssmZipPath = Join-Path $env:TEMP "nssm-$NssmVersion.zip"
+    $TempExtractDir = Join-Path $env:TEMP "nssm_extract_temp"
+
+    try {
+        Log-Info "Downloading nssm from $NssmZipUrl..."
+        Invoke-WebRequest -Uri $NssmZipUrl -OutFile $TempNssmZipPath -UseBasicParsing
+
+        if (Test-Path $TempExtractDir) { Remove-Item -Recurse -Force $TempExtractDir }
+        New-Item -ItemType Directory -Path $TempExtractDir -Force | Out-Null
+        Expand-Archive -Path $TempNssmZipPath -DestinationPath $TempExtractDir -Force
+
+        $NssmSourceDirInsideZip = "nssm-$NssmVersion" # Used for Get-ChildItem search path
+        # The path part within the extracted nssm folder, e.g. "nssm-2.24\win32"
+        # 'win32' nssm is used for both 'amd64' and 'arm64' PowerShell architectures.
+        $NssmArchSubDir = Join-Path "nssm-$NssmVersion" "win32"
+        $NssmSourceExePath = Join-Path (Join-Path $TempExtractDir $NssmArchSubDir) "nssm.exe"
+
+        if (-not (Test-Path $NssmSourceExePath)) {
+            Log-Error "Could not find nssm.exe at expected path: $NssmSourceExePath after extraction."
+            # Fallback search for nssm.exe within the extracted directory
+            $foundNssmFallback = Get-ChildItem -Path $TempExtractDir -Recurse -Filter "nssm.exe" |
+                Where-Object { $_.FullName -like "*$NssmArchSubDir\nssm.exe" } |
+                Select-Object -First 1
+            if ($foundNssmFallback) {
+                Log-Warning "Found nssm.exe at $($foundNssmFallback.FullName) using fallback search. Using this."
+                $NssmSourceExePath = $foundNssmFallback.FullName
+            }
+            else {
+                Log-Error "nssm.exe ($NssmArchSubDir) still not found in $TempExtractDir. Please install nssm manually (from https://nssm.cc) and ensure it's in your PATH."
+                exit 1
+            }
+        }
+
+        Copy-Item -Path $NssmSourceExePath -Destination $nssmExeToUse -Force
+
+        $env:Path = "$($InstallDir);$($env:Path)"
+        $nssmCmd = Get-Command nssm -ErrorAction SilentlyContinue # Re-check after adding to PATH
+        if ($nssmCmd) {
+            Log-Success "Downloaded nssm is now configured and available in PATH."
+        }
+        else {
+            Log-Error "Failed to configure downloaded nssm in PATH from $nssmExeToUse. Please ensure $InstallDir is in your system PATH or nssm is installed globally."
+            exit 1
+        }
+    }
+    catch {
+        Log-Error "Failed to download or configure nssm: $_"
+        Log-Error "Please install nssm manually from https://nssm.cc and ensure nssm.exe is in your PATH."
+        exit 1
+    }
+    finally {
+        if (Test-Path $TempNssmZipPath) { Remove-Item $TempNssmZipPath -Force -ErrorAction SilentlyContinue }
+        if (Test-Path $TempExtractDir) { Remove-Item -Recurse -Force $TempExtractDir -ErrorAction SilentlyContinue }
+    }
+}
+
+# Final check that nssm is operational
+try {
+    $nssmVersionOutput = nssm version 2>&1
+}
+catch {
+    Log-Error "nssm command failed to execute even after setup attempts. Please check the nssm installation and PATH. Error: $_"
+    exit 1
+}
+
+if ($UninstallOnly) {
+    Log-Step "Uninstalling service..."
+    nssm stop $ServiceName 2>$null | Out-Null
+    nssm remove $ServiceName confirm 2>$null | Out-Null
     $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if ($svc) {
-        if ($svc.Status -ne "Stopped") { Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue }
+        if ($svc.Status -ne "Stopped") { Stop-Service $ServiceName -Force -ErrorAction SilentlyContinue }
         sc.exe delete $ServiceName | Out-Null
     }
-    $exe = Join-Path $InstallDir "sakuio-agent.exe"
-    if (Test-Path $exe) { Remove-Item -Force $exe }
-    if ((Test-Path $InstallDir) -and -not (Get-ChildItem $InstallDir)) {
-        Remove-Item -Force $InstallDir
+    if (Test-Path (Join-Path $InstallDir "sakuio-agent.exe")) {
+        Remove-Item (Join-Path $InstallDir "sakuio-agent.exe") -Force
     }
-    Write-Host "sakuio-agent uninstalled."
+    if ((Test-Path $InstallDir) -and -not (Get-ChildItem $InstallDir -ErrorAction SilentlyContinue)) {
+        Remove-Item -Recurse -Force $InstallDir
+    }
+    Log-Success "sakuio-agent uninstalled."
     exit 0
 }
 
-if ($Uninstall) { Invoke-Uninstall }
-
-if (-not $Endpoint) {
-    Write-Error "missing required argument: -e <endpoint>"
-}
-if (-not $Token) {
-    Write-Error "missing required argument: -t <token>"
-}
-
-# Resolve version (latest release tag if not specified)
-if (-not $Version) {
-    $latest = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -UseBasicParsing
-    $Version = $latest.tag_name.TrimStart("v")
-}
-if (-not $Version) {
-    Write-Error "failed to resolve latest version; pass -Version"
+Log-Step "Installation configuration:"
+Log-Config "Service name: $ServiceName"
+Log-Config "Install directory: $InstallDir"
+Log-Config "GitHub proxy: $ProxyDisplay"
+Log-Config "Agent arguments: $($AgentArgs -join ' ')"
+if ($InstallVersion -ne "") {
+    Log-Config "Specified agent version: $InstallVersion"
+} else {
+    Log-Config "Agent version: Latest"
 }
 
-# Detect architecture
-switch ($env:PROCESSOR_ARCHITECTURE) {
-    "AMD64" { $Arch = "amd64" }
-    "ARM64" { $Arch = "arm64" }
-    "x86"   { $Arch = "386" }
-    default { Write-Error "unsupported architecture: $env:PROCESSOR_ARCHITECTURE" }
-}
+# Paths
+$BinaryName = "sakuio-agent-windows-$arch.exe"
+$AgentPath = Join-Path $InstallDir "sakuio-agent.exe"
 
-$Asset = "sakuio-agent-windows-$Arch.exe"
-$Base = if ($GithubProxy) { $GithubProxy.TrimEnd("/") } else { "https://github.com" }
-$DownloadUrl = "$Base/$Repo/releases/download/v$Version/$Asset"
-$ExePath = Join-Path $InstallDir "sakuio-agent.exe"
-
-# Build agent arguments
-$AgentArgs = @("-e", $Endpoint, "-t", $Token)
-if ($Interval) { $AgentArgs += @("-i", $Interval) }
-if ($DisableRemoteControl) { $AgentArgs += "--disable-remote-control" }
-if ($DisableAutoUpdate) { $AgentArgs += "--disable-auto-update" }
-if ($Insecure) { $AgentArgs += "--insecure" }
-if ($IncludeBufferMemory) { $AgentArgs += "--include-buffer-memory" }
-if ($IpFromNic) { $AgentArgs += "--ip-from-nic" }
-if ($GpuDetail) { $AgentArgs += "--gpu-detail" }
-if ($IncludeNics) { $AgentArgs += @("--include-nics", $IncludeNics) }
-if ($ExcludeNics) { $AgentArgs += @("--exclude-nics", $ExcludeNics) }
-if ($IncludeMountpoints) { $AgentArgs += @("--include-mountpoints", $IncludeMountpoints) }
-if ($MonthlyResetDay) { $AgentArgs += @("--monthly-reset-day", $MonthlyResetDay) }
-
-Write-Host "Downloading $Asset (v$Version) ..."
-New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Invoke-WebRequest -Uri $DownloadUrl -UseBasicParsing -OutFile $ExePath
-
-# --- nssm setup (wraps the agent for the Windows Service Control Manager) ---
-New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-$env:Path = "$InstallDir;$env:Path"
-$hasNssm = $false
-if (Test-Path $NssmExe) {
-    try { & $NssmExe version | Out-Null; $hasNssm = $true } catch { $hasNssm = $false }
-}
-if (-not $hasNssm) {
-    $NssmVersion = "2.24"
-    $ZipUrl = "https://nssm.cc/release/nssm-$NssmVersion.zip"
-    $TempZip = Join-Path $env:TEMP "nssm-$NssmVersion.zip"
-    $TempDir = Join-Path $env:TEMP "sakuio_nssm_extract"
-    try {
-        Write-Host "Downloading nssm from $ZipUrl ..."
-        Invoke-WebRequest -Uri $ZipUrl -OutFile $TempZip -UseBasicParsing
-        if (Test-Path $TempDir) { Remove-Item -Recurse -Force $TempDir }
-        Expand-Archive -Path $TempZip -DestinationPath $TempDir -Force
-        # win32 build of nssm works for amd64/arm64 PowerShell
-        $src = Join-Path (Join-Path $TempDir "nssm-$NssmVersion") "win32\nssm.exe"
-        if (-not (Test-Path $src)) {
-            $found = Get-ChildItem -Path $TempDir -Recurse -Filter "nssm.exe" | Select-Object -First 1
-            if ($found) { $src = $found.FullName }
+# Uninstall previous service and binary
+function Uninstall-Previous {
+    Log-Step "Checking for existing service..."
+    # Check if service exists using nssm status, as Get-Service might not work for nssm services if not properly registered
+    $serviceStatus = nssm status $ServiceName 2>&1
+    if ($serviceStatus -notmatch "SERVICE_STOPPED" -and $serviceStatus -notmatch "does not exist") {
+        Log-Info "Stopping service $ServiceName..."
+        nssm stop $ServiceName 2>&1 | Out-Null
+    }
+    # Attempt to remove the service using nssm
+    # We check if it exists first by trying to get its status.
+    # nssm remove will succeed if the service exists, and fail otherwise.
+    # We add confirm to avoid interactive prompts.
+    $removeOutput = nssm remove $ServiceName confirm 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Log-Info "Removed existing service $ServiceName."
+    }
+    elseif ($removeOutput -match "Can't open service! (The specified service does not exist as an installed service.)" -or $removeOutput -match "No such service" -or $removeOutput -match "does not exist") {
+        Log-Info "Service $ServiceName does not exist or was already removed."
+    }
+    else {
+        # If nssm remove fails for other reasons, try sc.exe delete as a fallback for older installations
+        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($svc) {
+            Stop-Service $ServiceName -Force -ErrorAction SilentlyContinue
+            sc.exe delete $ServiceName | Out-Null
         }
-        if (-not (Test-Path $src)) { throw "nssm.exe not found in archive" }
-        Copy-Item -Path $src -Destination $NssmExe -Force
     }
-    finally {
-        if (Test-Path $TempZip) { Remove-Item -Force $TempZip -ErrorAction SilentlyContinue }
-        if (Test-Path $TempDir) { Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue }
+
+    if (Test-Path $AgentPath) {
+        Log-Warning "Removing old binary..."
+        Remove-Item $AgentPath -Force
     }
 }
+Uninstall-Previous
 
-# Remove any previous installation of the service
-$svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if ($svc) {
-    if ($svc.Status -ne "Stopped") { Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue }
-    sc.exe delete $ServiceName | Out-Null
-    Start-Sleep -Seconds 1
+$versionToInstall = ""
+if ($InstallVersion -ne "") {
+    Log-Info "Attempting to install specified version: $InstallVersion"
+    $versionToInstall = $InstallVersion
 }
+else {
+    $ApiUrl = "https://api.github.com/repos/sakuio-monitor/Sakuio-agent/releases/latest"
+    try {
+        Log-Step "Fetching latest release version from GitHub API..."
+        $release = Invoke-RestMethod -Uri $ApiUrl -UseBasicParsing
+        $versionToInstall = $release.tag_name
+        Log-Success "Latest version fetched: $versionToInstall"
+    }
+    catch {
+        Log-Error "Failed to fetch latest version: $_"
+        exit 1
+    }
+}
+Log-Success "Installing Sakuio Agent version: $versionToInstall"
 
-# Register and start the service via nssm
-$argString = $AgentArgs -join " "
-& $NssmExe install $ServiceName $ExePath $argString | Out-Null
-& $NssmExe set $ServiceName DisplayName "Sakuio Agent" | Out-Null
-& $NssmExe set $ServiceName Start SERVICE_AUTO_START | Out-Null
-& $NssmExe set $ServiceName AppExit Default Restart | Out-Null
-& $NssmExe set $ServiceName AppRestartDelay 5000 | Out-Null
-& $NssmExe start $ServiceName
+# Construct download URL
+$DownloadUrl = if ($GitHubProxy) { "$GitHubProxy/https://github.com/sakuio-monitor/Sakuio-agent/releases/download/$versionToInstall/$BinaryName" } else { "https://github.com/sakuio-monitor/Sakuio-agent/releases/download/$versionToInstall/$BinaryName" }
 
-Write-Host "sakuio-agent v$Version installed as nssm service '$ServiceName'."
+# Download and install
+New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+Log-Info "URL: $DownloadUrl"
+try {
+    Invoke-WebRequest -Uri $DownloadUrl -OutFile $AgentPath -UseBasicParsing
+}
+catch {
+    Log-Error "Download failed: $_"
+    exit 1
+}
+Log-Success "Downloaded and saved to $AgentPath"
+
+# Register and start service
+Log-Step "Configuring Windows service with nssm..."
+$argString = $AgentArgs -join ' '
+# The application path is passed WITHOUT literal quotes: PowerShell already
+# quotes native arguments containing spaces on the command line, while
+# embedded quotes made nssm store a broken Application path.
+nssm install $ServiceName $AgentPath $argString
+# Set display name and startup type using nssm
+nssm set $ServiceName DisplayName "Sakuio Agent"
+nssm set $ServiceName Start SERVICE_AUTO_START
+nssm set $ServiceName AppExit Default Restart
+nssm set $ServiceName AppRestartDelay 5000
+# Start the service using nssm
+nssm start $ServiceName
+Log-Success "Service $ServiceName installed and started using nssm."
+
+Log-Success "Sakuio Agent installation completed!"
+Log-Config "Service name: $ServiceName"
+Log-Config "Arguments: $argString"
