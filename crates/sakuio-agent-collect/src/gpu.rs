@@ -498,11 +498,97 @@ mod platform_impl {
 
 #[cfg(target_os = "windows")]
 mod platform_impl {
+    // 照参考实现 gpu_windows.go 方案：CreateDXGIFactory1 枚举 DXGI 适配器，
+    // 跳过软件适配器、按 LUID 去重，不依赖 nvidia-smi
     use super::DetailedGpu;
     use crate::nvidia_smi;
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ADAPTER_DESC1,
+    };
+
+    fn dxgi_adapters() -> Vec<DXGI_ADAPTER_DESC1> {
+        let Ok(factory) = unsafe { CreateDXGIFactory1::<IDXGIFactory1>() } else {
+            return Vec::new();
+        };
+        let mut adapters = Vec::new();
+        for index in 0..32u32 {
+            // DXGI_ERROR_NOT_FOUND 或其他错误即结束枚举
+            let Ok(adapter) = unsafe { factory.EnumAdapters1(index) } else {
+                break;
+            };
+            let mut desc = DXGI_ADAPTER_DESC1::default();
+            if unsafe { adapter.GetDesc1(&mut desc) }.is_err() {
+                break;
+            }
+            adapters.push(desc);
+        }
+        adapters
+    }
+
+    fn adapter_name(desc: &DXGI_ADAPTER_DESC1) -> String {
+        let end = desc
+            .Description
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(desc.Description.len());
+        String::from_utf16_lossy(&desc.Description[..end])
+    }
+
+    // 参考实现 GpuName：跳过软件适配器、按 LUID 去重后拼接型号列表
+    fn dxgi_gpu_names() -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut names = Vec::new();
+        for desc in dxgi_adapters() {
+            if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
+                continue;
+            }
+            let key = (desc.AdapterLuid.HighPart, desc.AdapterLuid.LowPart);
+            if seen.insert(key) {
+                let name = adapter_name(&desc);
+                if !name.is_empty() {
+                    names.push(name);
+                }
+            }
+        }
+        names
+    }
+
+    fn format_gpu_name_list(names: Vec<String>) -> Option<String> {
+        // 照参考实现 formatGPUNameList：保持顺序、去重计数
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut order: Vec<String> = Vec::new();
+        for name in names {
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            if counts.get(&name).copied().unwrap_or(0) == 0 {
+                order.push(name.clone());
+            }
+            *counts.entry(name).or_insert(0) += 1;
+        }
+        if order.is_empty() {
+            return None;
+        }
+        Some(
+            order
+                .into_iter()
+                .map(|name| {
+                    let count = counts.get(&name).copied().unwrap_or(1);
+                    if count > 1 {
+                        format!("{name} x {count}")
+                    } else {
+                        name
+                    }
+                })
+                .collect::<Vec<String>>()
+                .join(", "),
+        )
+    }
 
     pub fn gpu_name() -> Option<String> {
-        nvidia_smi::gpu_models().ok().and_then(|m| m.first().cloned())
+        format_gpu_name_list(dxgi_gpu_names())
+            .or_else(|| nvidia_smi::gpu_models().ok().and_then(|m| m.first().cloned()))
     }
 
     pub fn detailed_gpu() -> Result<Vec<DetailedGpu>, String> {
@@ -519,6 +605,10 @@ mod platform_impl {
     }
 
     pub fn gpu_models() -> Result<Vec<String>, String> {
+        let names = dxgi_gpu_names();
+        if !names.is_empty() {
+            return Ok(names);
+        }
         nvidia_smi::gpu_models()
     }
 }

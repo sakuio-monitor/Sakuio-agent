@@ -27,6 +27,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_ProcessStatus",
 ] }
+windows = { version = "0.57", features = ["Win32_Foundation", "Win32_Graphics_Dxgi"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
