@@ -4,10 +4,10 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio-agent/main/install.sh \
-#     | sudo bash -s -- -e wss://panel.example.com/api/agent/link -t <node-token> [options...]
+#     | sudo bash -s -- -e wss://panel.example.com -t <node-token> [options...]
 #
 # Options:
-#   -e, --endpoint URL            Board WebSocket endpoint (required)
+#   -e, --endpoint URL            Board base URL, ws(s)://host[:port] (required)
 #   -t, --token TOKEN             Node token (or auto-discovery key) (required)
 #       --disable-remote-control  Disable terminal / file / shell / exec
 #       --disable-auto-update     Disable built-in auto update (reserved)

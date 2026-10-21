@@ -1,7 +1,6 @@
 use futures_util::SinkExt;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
-#[cfg(not(windows))]
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -27,15 +26,23 @@ impl ExecBridge {
         }
 
         let mut child = build_command().await?;
-        let script = format!("{{\n{command}\n}} 2>&1\n");
+        let script = build_script(command);
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(script.as_bytes()).await.ok();
         }
 
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         if let Some(stdout) = child.stdout.take() {
+            let stdout_tx = out_tx.clone();
             tokio::spawn(async move {
-                pump_stream_to_channel(stdout, out_tx).await;
+                pump_stream_to_channel(stdout, stdout_tx).await;
+            });
+        }
+        // Unix merges stderr into stdout at the shell level; Windows pipes it here.
+        if let Some(stderr) = child.stderr.take() {
+            let err_tx = out_tx.clone();
+            tokio::spawn(async move {
+                pump_stream_to_channel(stderr, err_tx).await;
             });
         }
 
@@ -80,7 +87,16 @@ where
 async fn build_command() -> anyhow::Result<tokio::process::Child> {
     #[cfg(windows)]
     {
-        anyhow::bail!("remote exec on Windows agent is not supported yet");
+        use std::process::Stdio;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let child = Command::new("cmd.exe")
+            .arg("/Q")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()?;
+        Ok(child)
     }
     #[cfg(not(windows))]
     {
@@ -92,4 +108,16 @@ async fn build_command() -> anyhow::Result<tokio::process::Child> {
             .spawn()?;
         Ok(child)
     }
+}
+
+/// Feeds the command to the child's stdin as a shell script.
+#[cfg(not(windows))]
+fn build_script(command: &str) -> String {
+    format!("{{\n{command}\n}} 2>&1\n")
+}
+
+/// Windows: drive interactive `cmd.exe`; keep the exit code of the last command.
+#[cfg(windows)]
+fn build_script(command: &str) -> String {
+    format!("{command}\r\nexit /b %ERRORLEVEL%\r\n")
 }

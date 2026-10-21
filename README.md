@@ -6,12 +6,12 @@ Cross-platform monitoring agent (Linux, macOS, Windows, BSD). Uses **SakuLink** 
 
 ```bash
 cargo run -p sakuio-agent -- \
-  --endpoint ws://<中控地址>/api/agent/link \
+  --endpoint ws://<中控地址> \
   --token "<token from POST /api/admin/clients>"
 
 # or environment variables:
 export SAKUIO_NODE_TOKEN="<token>"
-export SAKUIO_BOARD_ENDPOINT="ws://127.0.0.1:8080/api/agent/link"
+export SAKUIO_BOARD_ENDPOINT="ws://127.0.0.1:8080"
 export SAKUIO_AGENT_ENABLE_GPU=true
 export SAKUIO_AGENT_MEMORY_INCLUDE_CACHE=false
 export SAKUIO_AGENT_MEMORY_REPORT_RAW_USED=false
