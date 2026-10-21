@@ -143,15 +143,25 @@ async fn main() -> anyhow::Result<()> {
     if endpoint.is_empty() {
         anyhow::bail!("endpoint must not be empty");
     }
-    // First start: explicit token (node token or auto-discovery key) wins,
-    // otherwise fall back to the persisted token from a previous registration.
-    let mut token = cli
-        .token
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| stored_token(&cli.state))
+    // Token resolution order (aligned with the reference agent):
+    // 1. Token persisted in the state file (assigned by a previous auto
+    //    discovery). It must ALWAYS win — otherwise every restart with
+    //    --auto-discovery would hit the board's IP-binding window and
+    //    register a duplicate node once the dedup window expires.
+    // 2. Explicit -t / --auto-discovery / SAKUIO_NODE_TOKEN (first start).
+    //    Re-installing clears the state file, so a migrated node takes the
+    //    new key.
+    // 令牌解析顺序（对齐参考实现）：state 文件中已分配的令牌永远优先，
+    // 否则带 --auto-discovery 重启会因面板 IP 绑定窗口过期而重复注册节点；
+    // 显式参数仅作首次启动回退（重装会清理 state 文件）。
+    let mut token = stored_token(&cli.state)
+        .or_else(|| {
+            cli.token
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
         .ok_or_else(|| {
             anyhow::anyhow!("--token / -t or SAKUIO_NODE_TOKEN is required on first start")
         })?;

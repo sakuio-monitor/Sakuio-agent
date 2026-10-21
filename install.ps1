@@ -296,6 +296,15 @@ Log-Success "Downloaded and saved to $AgentPath"
 
 # Register and start service
 Log-Step "Configuring Windows service with nssm..."
+# The persisted token (auto discovery result) lives in the install dir;
+# always pass it as an absolute path and pin the working directory, so the
+# token file cannot drift with the service manager's startup directory.
+# 持久化令牌存放在安装目录：显式传绝对路径并固定工作目录，
+# 避免令牌文件随服务管理器启动目录漂移。
+$StateFile = Join-Path $InstallDir "sakuio-agent-token"
+if (-not ($AgentArgs | Where-Object { $_ -eq "--state" })) {
+    $AgentArgs += @("--state", $StateFile)
+}
 $argString = $AgentArgs -join ' '
 # The application path is passed WITHOUT literal quotes: PowerShell already
 # quotes native arguments containing spaces on the command line, while
@@ -304,6 +313,7 @@ nssm install $ServiceName $AgentPath $argString
 # Set display name and startup type using nssm
 nssm set $ServiceName DisplayName "Sakuio Agent"
 nssm set $ServiceName Start SERVICE_AUTO_START
+nssm set $ServiceName AppDirectory $InstallDir
 nssm set $ServiceName AppExit Default Restart
 nssm set $ServiceName AppRestartDelay 5000
 # Start the service using nssm

@@ -143,8 +143,14 @@ chmod +x "$BIN"
 echo "==> installing agent v${AGENT_VERSION} (${OS}/${ARCH}) to $INSTALL_DIR"
 
 # ---- service definition ----
+# The persisted token (auto discovery result) lives here; always pass it as
+# an absolute path and pin the working directory, otherwise the default
+# relative --state path lands wherever the service manager happens to start.
+# 持久化令牌存放在安装目录；必须显式传绝对路径并固定工作目录，
+# 否则默认相对路径会随服务管理器的启动目录漂移。
+STATE_FILE="$INSTALL_DIR/sakuio-agent-token"
 if command -v systemctl >/dev/null 2>&1 && [[ "$(uname -s)" == "Linux" ]]; then
-  EXEC_LINE="$BIN -e \"$ENDPOINT\" -t \"$TOKEN\""
+  EXEC_LINE="$BIN -e \"$ENDPOINT\" -t \"$TOKEN\" --state \"$STATE_FILE\""
   for a in "${EXTRA_ARGS[@]:-}"; do
     [[ -n "$a" ]] && EXEC_LINE="$EXEC_LINE \"$a\""
   done
@@ -156,6 +162,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+WorkingDirectory=$INSTALL_DIR
 ExecStart=$EXEC_LINE
 Restart=always
 RestartSec=5
@@ -173,7 +180,8 @@ elif [[ "$(uname -s)" == "Darwin" ]]; then
   ARGS_PLIST="$ARGS_PLIST
     <string>$BIN</string>
     <string>-e</string><string>$ENDPOINT</string>
-    <string>-t</string><string>$TOKEN</string>"
+    <string>-t</string><string>$TOKEN</string>
+    <string>--state</string><string>$STATE_FILE</string>"
   for a in "${EXTRA_ARGS[@]:-}"; do
     [[ -n "$a" ]] && ARGS_PLIST="$ARGS_PLIST
     <string>$a</string>"
@@ -187,6 +195,7 @@ elif [[ "$(uname -s)" == "Darwin" ]]; then
     <key>ProgramArguments</key>
     <array>$ARGS_PLIST
     </array>
+    <key>WorkingDirectory</key><string>$INSTALL_DIR</string>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
     <key>StandardOutPath</key><string>/var/log/$SERVICE_NAME.log</string>
