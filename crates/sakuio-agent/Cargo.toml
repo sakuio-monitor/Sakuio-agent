@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 sakuio-agent-core = { path = "../sakuio-agent-core" }
+sakuio-agent-remote = { path = "../sakuio-agent-remote" }
 sakuio-agent-ws = { path = "../sakuio-agent-ws" }
 tokio.workspace = true
 tracing.workspace = true

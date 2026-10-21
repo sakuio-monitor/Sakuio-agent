@@ -13,5 +13,8 @@ sakuio-agent-remote = { path = "../sakuio-agent-remote" }
 sakuio-board.workspace = true
 sakuio-protocol.workspace = true
 serde_json.workspace = true
+serde.workspace = true
+sha2 = "0.10"
 tokio.workspace = true
 tracing.workspace = true
+ureq.workspace = true

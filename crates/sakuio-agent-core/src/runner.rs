@@ -1,7 +1,10 @@
 use sakuio_agent_collect::{CollectState, Reporter};
 use sakuio_board::{BoardConnectInfo, BoardFrame, BoardSession, BoardTransport};
 use sakuio_agent_collect::run_ping;
-use sakuio_agent_remote::{execute_file_op, run_relay_pump, ExecBridge, RelayMode, ShellBridge};
+use sakuio_agent_remote::{
+    execute_file_op, resolve_relay_url, run_relay_pump, ExecBridge, RelayMode, ShellBridge,
+};
+use crate::update::BoardLinkSnapshot;
 use sakuio_protocol::{
     AgentPingParams, ControlMessage, ControlOp, HelloParams, RemoteExecOpen, RemoteFileCommand,
     RemoteFileResult, RemoteShellOpen, RemoteStreamRead, RemoteStreamWrite, SyncCommandItem,
@@ -21,6 +24,9 @@ use tokio::time::{interval, MissedTickBehavior};
 pub struct AgentConfig {
     pub node_token: String,
     pub agent_version: String,
+    /// `ws(s)://host[:port]` base derived from the `-e` endpoint; used to join
+    /// relay paths the board sends down.
+    pub endpoint_base: String,
     pub telemetry_interval: Duration,
     pub info_report_interval: Duration,
     pub max_pending_batches: u32,
@@ -30,6 +36,10 @@ pub struct AgentConfig {
     /// are not advertised or served.
     /// 为 true 时不声明也不响应远程控制能力。
     pub disable_remote_control: bool,
+    /// Shared slot written by the session runner (link alive + board-advertised
+    /// compatible agent version range) and read by the self-update loop.
+    /// 会话循环写入（链路存活状态 + 面板兼容版本区间）、自更新循环读取的共享槽。
+    pub link_state_slot: Arc<std::sync::RwLock<BoardLinkSnapshot>>,
 }
 
 /// Runs the board session until error or shutdown.
@@ -43,10 +53,18 @@ impl AgentRunner {
     pub fn new(transport: Arc<dyn BoardTransport>, config: AgentConfig) -> Self {
         Self { transport, config }
     }
-
     /// Connects, completes hello/welcome, pushes basic info and telemetry loop.
     /// 连接、完成 hello/welcome、上报静态信息并进入遥测循环。
+    /// 会话结束后将链路快照标记为断开（无论正常退出还是出错）。
     pub async fn run(&self) -> anyhow::Result<()> {
+        let result = self.run_session().await;
+        if let Ok(mut slot) = self.config.link_state_slot.write() {
+            slot.connected = false;
+        }
+        result
+    }
+
+    async fn run_session(&self) -> anyhow::Result<()> {
         let info = BoardConnectInfo {
             node_token: self.config.node_token.clone(),
             agent_version: self.config.agent_version.clone(),
@@ -71,9 +89,13 @@ impl AgentRunner {
             .transport
             .connect(info)
             .await
-            .map_err(|e| anyhow::anyhow!("connect: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("connect to board failed: {e}"))?;
 
         let welcome = self.handshake(&mut session).await?;
+        if let Ok(mut slot) = self.config.link_state_slot.write() {
+            slot.connected = true;
+            slot.version_range = welcome.agent_version_range.clone();
+        }
         let node_uuid = welcome.node_uuid.clone();
         self.persist_assigned_token(&welcome).await;
 
@@ -405,41 +427,42 @@ impl AgentRunner {
 
     fn spawn_stream_read(&self, item: SyncCommandItem) -> anyhow::Result<()> {
         let req: RemoteStreamRead = serde_json::from_value(item.payload)?;
-        let endpoint = req.relay.path.clone();
+        let endpoint = resolve_relay_url(&self.config.endpoint_base, &req.relay.path);
         let token = req.relay.token.clone();
         let path = req.path.clone();
         tokio::spawn(async move {
-            let _ = run_relay_pump(&endpoint, &token, RelayMode::ReadFile(path)).await;
+            if let Err(e) = run_relay_pump(&endpoint, &token, RelayMode::ReadFile(path)).await {
+                tracing::warn!(error = %e, "relay file read failed");
+            }
         });
         Ok(())
     }
 
     fn spawn_stream_write(&self, item: SyncCommandItem) -> anyhow::Result<()> {
         let req: RemoteStreamWrite = serde_json::from_value(item.payload)?;
-        let endpoint = req.relay.path.clone();
+        let endpoint = resolve_relay_url(&self.config.endpoint_base, &req.relay.path);
         let token = req.relay.token.clone();
         let path = req.path.clone();
         tokio::spawn(async move {
-            let _ = run_relay_pump(&endpoint, &token, RelayMode::WriteFile(path)).await;
+            if let Err(e) = run_relay_pump(&endpoint, &token, RelayMode::WriteFile(path)).await {
+                tracing::warn!(error = %e, "relay file write failed");
+            }
         });
         Ok(())
     }
 
     fn spawn_remote_shell(&self, item: SyncCommandItem) -> anyhow::Result<()> {
         let open: RemoteShellOpen = serde_json::from_value(item.payload)?;
-        let endpoint = open.relay.path.clone();
+        let endpoint = resolve_relay_url(&self.config.endpoint_base, &open.relay.path);
         let token = open.relay.token.clone();
         let bridge = ShellBridge {
             cols: open.cols,
             rows: open.rows,
         };
         tokio::spawn(async move {
-            let _ = run_relay_pump(
-                &endpoint,
-                &token,
-                RelayMode::Shell(bridge),
-            )
-            .await;
+            if let Err(e) = run_relay_pump(&endpoint, &token, RelayMode::Shell(bridge)).await {
+                tracing::warn!(error = %e, "relay shell session failed");
+            }
         });
         Ok(())
     }
@@ -450,7 +473,7 @@ impl AgentRunner {
         item: SyncCommandItem,
     ) -> anyhow::Result<()> {
         let open: RemoteExecOpen = serde_json::from_value(item.payload)?;
-        let endpoint = open.relay.path.clone();
+        let endpoint = resolve_relay_url(&self.config.endpoint_base, &open.relay.path);
         let token = open.relay.token.clone();
         let bridge = ExecBridge {
             command: open.command.clone(),
@@ -466,7 +489,14 @@ impl AgentRunner {
             .await
             {
                 Ok(Some(v)) => v,
-                _ => (String::new(), -1),
+                Ok(None) => {
+                    tracing::warn!(task_id = %task_id, "relay exec session ended without a summary");
+                    (String::new(), -1)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, task_id = %task_id, "relay exec failed");
+                    (format!("agent relay error: {e}"), -1)
+                }
             };
             let finished_at = chrono::Utc::now().to_rfc3339();
             let msg = ControlMessage::new(
