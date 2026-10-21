@@ -507,13 +507,13 @@ mod platform_impl {
     };
 
     fn dxgi_adapters() -> Vec<DXGI_ADAPTER_DESC1> {
-        let Ok(factory) = unsafe { CreateDXGIFactory1::<IDXGIFactory1>() } else {
+        let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }) else {
             return Vec::new();
         };
         let mut adapters = Vec::new();
         for index in 0..32u32 {
             // DXGI_ERROR_NOT_FOUND 或其他错误即结束枚举
-            let Ok(adapter) = unsafe { factory.EnumAdapters1(index) } else {
+            let Ok(adapter) = (unsafe { factory.EnumAdapters1(index) }) else {
                 break;
             };
             let mut desc = DXGI_ADAPTER_DESC1::default();
