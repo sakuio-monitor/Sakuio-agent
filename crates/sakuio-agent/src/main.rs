@@ -17,7 +17,7 @@ struct Cli {
     endpoint: String,
 
     /// Node token from the admin console, or the auto-discovery key.
-    #[arg(long, short = 't', env = "SAKUIO_NODE_TOKEN")]
+    #[arg(long, short = 't', alias = "auto-discovery", env = "SAKUIO_NODE_TOKEN")]
     token: Option<String>,
 
     /// State file used to persist a server-assigned token (auto discovery).
@@ -35,6 +35,56 @@ struct Cli {
     /// Interval in minutes for re-reporting basic host info.
     #[arg(long, env = "SAKUIO_AGENT_INFO_REPORT_INTERVAL", default_value_t = 5)]
     info_report_interval: u64,
+
+    /// Disable remote control capabilities (terminal / file / shell / exec).
+    /// 禁用远程控制能力（终端 / 文件 / shell / exec）。
+    #[arg(long)]
+    disable_remote_control: bool,
+
+    /// Disable built-in auto update (reserved; current builds do not self-update).
+    /// 禁用自动更新（预留；当前版本尚未内置自更新）。
+    #[arg(long)]
+    disable_auto_update: bool,
+
+    /// Skip TLS certificate verification for wss:// endpoints (self-signed setups).
+    /// 忽略 TLS 证书校验（自签名部署场景）。
+    #[arg(long)]
+    insecure: bool,
+
+    /// Include buffer/cache memory in used-memory accounting.
+    /// 内存占用统计包含缓冲区 / 缓存。
+    #[arg(long)]
+    include_buffer_memory: bool,
+
+    /// Prefer the NIC address as the reported public IP.
+    /// 优先从网卡获取 IP 地址上报。
+    #[arg(long)]
+    ip_from_nic: bool,
+
+    /// Enable detailed GPU monitoring.
+    /// 启用详细 GPU 监控。
+    #[arg(long)]
+    gpu_detail: bool,
+
+    /// Comma-separated list of NICs to include for traffic stats.
+    /// 只监测特定网卡（逗号分隔）。
+    #[arg(long)]
+    include_nics: Option<String>,
+
+    /// Comma-separated list of NICs to exclude from traffic stats.
+    /// 排除特定网卡（逗号分隔）。
+    #[arg(long)]
+    exclude_nics: Option<String>,
+
+    /// Comma-separated list of mount points to include for disk stats.
+    /// 只监测特定挂载点（逗号分隔）。
+    #[arg(long)]
+    include_mountpoints: Option<String>,
+
+    /// Day of month (1-31) to rotate network statistics counters.
+    /// 网络统计月重置日（1-31）。
+    #[arg(long)]
+    monthly_reset_day: Option<u32>,
 }
 
 /// Reads the persisted server-assigned token from the state file, if any.
@@ -43,6 +93,37 @@ fn stored_token(state: &PathBuf) -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Maps install-time flags onto the `SAKUIO_AGENT_*` environment variables
+/// consumed by the collector (`CollectConfig::default`).
+/// 把安装选项映射到采集器读取的 `SAKUIO_AGENT_*` 环境变量。
+fn apply_collect_env(cli: &Cli) {
+    if cli.include_buffer_memory {
+        std::env::set_var("SAKUIO_AGENT_MEMORY_INCLUDE_CACHE", "1");
+    }
+    if cli.ip_from_nic {
+        std::env::set_var("SAKUIO_AGENT_GET_IP_FROM_NIC", "1");
+    }
+    if cli.gpu_detail {
+        std::env::set_var("SAKUIO_AGENT_ENABLE_GPU", "1");
+    }
+    if let Some(v) = cli.include_nics.as_deref().filter(|v| !v.trim().is_empty()) {
+        std::env::set_var("SAKUIO_AGENT_INCLUDE_NICS", v.trim());
+    }
+    if let Some(v) = cli.exclude_nics.as_deref().filter(|v| !v.trim().is_empty()) {
+        std::env::set_var("SAKUIO_AGENT_EXCLUDE_NICS", v.trim());
+    }
+    if let Some(v) = cli
+        .include_mountpoints
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+    {
+        std::env::set_var("SAKUIO_AGENT_INCLUDE_MOUNTPOINTS", v.trim());
+    }
+    if let Some(d) = cli.monthly_reset_day {
+        std::env::set_var("SAKUIO_AGENT_MONTH_ROTATE", d.to_string());
+    }
 }
 
 #[tokio::main]
@@ -72,12 +153,15 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(endpoint = %endpoint, "connecting to board");
 
     let transport = Arc::new(
-        WsBoardTransport::new(endpoint).map_err(|e| anyhow::anyhow!("endpoint: {e}"))?,
+        WsBoardTransport::new(endpoint)
+            .map_err(|e| anyhow::anyhow!("endpoint: {e}"))?
+            .with_insecure(cli.insecure),
     );
 
     if !cli.interval.is_finite() || cli.interval <= 0.0 {
         anyhow::bail!("--interval must be a positive number of seconds");
     }
+    apply_collect_env(&cli);
 
     let reconnect = Duration::from_secs(cli.reconnect_interval.max(1));
     let mut first_attempt = true;
@@ -101,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
             info_report_interval: Duration::from_secs(cli.info_report_interval.max(1) * 60),
             max_pending_batches: 8,
             state_path: Some(cli.state.to_string_lossy().to_string()),
+            disable_remote_control: cli.disable_remote_control,
         };
         let runner = AgentRunner::new(transport.clone(), config);
         match runner.run().await {

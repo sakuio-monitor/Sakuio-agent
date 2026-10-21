@@ -3,13 +3,71 @@ use async_trait::async_trait;
 use http::StatusCode;
 use sakuio_board::{BoardConnectInfo, BoardSession, BoardTransport, TransportError};
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::Connector;
 use tokio_tungstenite::tungstenite::Error as WsError;
 use url::Url;
+
+/// Verifier that accepts any server certificate (only used with --insecure).
+/// 接受任意服务器证书的校验器（仅 --insecure 时使用）。
+#[derive(Debug)]
+struct NoCertVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for NoCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::RSA_PKCS1_SHA384,
+            rustls::SignatureScheme::RSA_PKCS1_SHA512,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+            rustls::SignatureScheme::RSA_PSS_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_PSS_SHA512,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+            rustls::SignatureScheme::ED25519,
+        ]
+    }
+}
 
 /// WebSocket implementation of [`BoardTransport`].
 /// WebSocket 版 [`BoardTransport`]。
 pub struct WsBoardTransport {
     endpoint: Url,
+    /// Skip TLS certificate verification (self-signed deployments).
+    /// 跳过 TLS 证书校验（自签名部署）。
+    insecure_tls: bool,
 }
 
 impl WsBoardTransport {
@@ -17,7 +75,28 @@ impl WsBoardTransport {
     /// 解析 `wss://host/path` 形式的中控地址。
     pub fn new(endpoint: &str) -> Result<Self, TransportError> {
         let url = Url::parse(endpoint).map_err(|e| TransportError::Connect(e.to_string()))?;
-        Ok(Self { endpoint: url })
+        Ok(Self {
+            endpoint: url,
+            insecure_tls: false,
+        })
+    }
+
+    /// Enables skipping of TLS certificate verification.
+    /// 开启后跳过 TLS 证书校验。
+    pub fn with_insecure(mut self, insecure: bool) -> Self {
+        self.insecure_tls = insecure;
+        self
+    }
+
+    fn dangerous_tls_connector() -> Connector {
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("supported tls protocol versions")
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(NoCertVerifier))
+            .with_no_client_auth();
+        Connector::Rustls(std::sync::Arc::new(config))
     }
 }
 
@@ -64,9 +143,19 @@ impl BoardTransport for WsBoardTransport {
             pairs.clear();
             pairs.append_pair("token", token);
         }
-        let (socket, _resp) = connect_async(url.as_str())
+        let connect_result = if self.insecure_tls && url.scheme() == "wss" {
+            tokio_tungstenite::connect_async_tls_with_config(
+                url.as_str(),
+                None,
+                false,
+                Some(Self::dangerous_tls_connector()),
+            )
             .await
-            .map_err(|e| TransportError::Connect(map_connect_error(e)))?;
+        } else {
+            connect_async(url.as_str()).await
+        };
+        let (socket, _resp) =
+            connect_result.map_err(|e| TransportError::Connect(map_connect_error(e)))?;
         let session_id = "agent-pending".to_string();
         Ok(Box::new(WsBoardSession::new(session_id, socket)))
     }

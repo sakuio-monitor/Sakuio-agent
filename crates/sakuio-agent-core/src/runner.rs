@@ -26,6 +26,10 @@ pub struct AgentConfig {
     pub max_pending_batches: u32,
     /// Path used to persist a server-assigned token (auto discovery).
     pub state_path: Option<String>,
+    /// When true, remote control capabilities (terminal / file / shell / exec)
+    /// are not advertised or served.
+    /// 为 true 时不声明也不响应远程控制能力。
+    pub disable_remote_control: bool,
 }
 
 /// Runs the board session until error or shutdown.
@@ -46,14 +50,22 @@ impl AgentRunner {
         let info = BoardConnectInfo {
             node_token: self.config.node_token.clone(),
             agent_version: self.config.agent_version.clone(),
-            capabilities: vec![
-                "telemetry".into(),
-                "basic_info".into(),
-                "ping".into(),
-                "remote.file".into(),
-                "remote.shell".into(),
-                "remote.exec".into(),
-            ],
+            capabilities: if self.config.disable_remote_control {
+                vec![
+                    "telemetry".into(),
+                    "basic_info".into(),
+                    "ping".into(),
+                ]
+            } else {
+                vec![
+                    "telemetry".into(),
+                    "basic_info".into(),
+                    "ping".into(),
+                    "remote.file".into(),
+                    "remote.shell".into(),
+                    "remote.exec".into(),
+                ]
+            },
         };
         let mut session = self
             .transport

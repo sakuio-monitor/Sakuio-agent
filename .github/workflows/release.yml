@@ -1,0 +1,105 @@
+# Sakuio agent release pipeline.
+# 推送 v* tag（或手动 workflow_dispatch）触发：交叉编译全部目标并发布 GitHub Release。
+# 目标矩阵与资产命名约定见 Sakuio 仓库 docs/CICD.md。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---- Linux（zig 交叉编译）----
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, asset: sakuio-agent-linux-amd64, zig: true }
+          - { os: ubuntu-24.04, target: i686-unknown-linux-gnu, asset: sakuio-agent-linux-386, zig: true }
+          - { os: ubuntu-24.04, target: aarch64-unknown-linux-gnu, asset: sakuio-agent-linux-arm64, zig: true }
+          - { os: ubuntu-24.04, target: armv7-unknown-linux-gnueabihf, asset: sakuio-agent-linux-arm, zig: true }
+          - { os: ubuntu-24.04, target: loongarch64-unknown-linux-gnu, asset: sakuio-agent-linux-loong64, zig: true }
+          - { os: ubuntu-24.04, target: riscv64gc-unknown-linux-gnu, asset: sakuio-agent-linux-riscv64, zig: true }
+          # ---- Linux MIPS（zig 不支持 MIPS；musl 目标 self-contained，用内置 rust-lld）----
+          - { os: ubuntu-24.04, target: mips-unknown-linux-musl, asset: sakuio-agent-linux-mips, zig: false }
+          - { os: ubuntu-24.04, target: mipsel-unknown-linux-musl, asset: sakuio-agent-linux-mipsel, zig: false }
+          # ---- macOS（原生工具链交叉两个架构）----
+          - { os: macos-14, target: aarch64-apple-darwin, asset: sakuio-agent-darwin-arm64, zig: false }
+          - { os: macos-14, target: x86_64-apple-darwin, asset: sakuio-agent-darwin-amd64, zig: false }
+          # ---- Windows（MSVC 原生交叉）----
+          - { os: windows-2022, target: x86_64-pc-windows-msvc, asset: sakuio-agent-windows-amd64.exe, zig: false }
+          - { os: windows-2022, target: i686-pc-windows-msvc, asset: sakuio-agent-windows-386.exe, zig: false }
+          - { os: windows-2022, target: aarch64-pc-windows-msvc, asset: sakuio-agent-windows-arm64.exe, zig: false }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # agent 通过相对路径依赖主仓库的 sakuio-protocol / sakuio-board（../sakuio），
+      # 这里检出主仓库并软链到上一级目录以满足路径解析。
+      - uses: actions/checkout@v4
+        with:
+          repository: sakuio-monitor/Sakuio
+          ref: main
+          path: sakuio
+      - name: Link path dependencies
+        shell: bash
+        run: ln -s "$GITHUB_WORKSPACE/sakuio" "$(dirname "$GITHUB_WORKSPACE")/sakuio"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild
+        if: matrix.zig
+        uses: taiki-e/install-action@cargo-zigbuild
+
+      - name: Build (zig)
+        if: matrix.zig
+        shell: bash
+        run: cargo zigbuild --release --target ${{ matrix.target }} -p sakuio-agent
+
+      - name: Build (native toolchain)
+        if: ${{ !matrix.zig }}
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }} -p sakuio-agent
+
+      - name: Collect binary
+        shell: bash
+        run: |
+          EXE=""
+          if [[ "${{ matrix.target }}" == *windows* ]]; then EXE=".exe"; fi
+          cp "target/${{ matrix.target }}/release/sakuio-agent$EXE" "${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
