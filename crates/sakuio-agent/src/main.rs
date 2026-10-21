@@ -1,18 +1,20 @@
 use clap::Parser;
 use sakuio_agent_core::{AgentConfig, AgentRunner};
+use sakuio_agent_remote::ws_base;
 use sakuio_agent_ws::WsBoardTransport;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tracing_subscriber::EnvFilter;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const DEFAULT_ENDPOINT: &str = "ws://127.0.0.1:8080/api/agent/link";
+const DEFAULT_ENDPOINT: &str = "ws://127.0.0.1:8080";
 const DEFAULT_STATE_FILE: &str = "sakuio-agent-token";
 
 /// Sakuio board agent: connects with token and pushes host metrics.
 #[derive(Debug, Parser)]
 #[command(name = "sakuio-agent", version = VERSION, about)]
 struct Cli {
-    /// Board WebSocket URL (query `token` is appended automatically).
+    /// Board base URL, e.g. `ws://192.168.1.10:8080` or `wss://panel.example.com`.
+    /// Board WebSocket base（`ws(s)://host[:port]`，路径由 agent 内部处理）。
     #[arg(long, short = 'e', env = "SAKUIO_BOARD_ENDPOINT", default_value = DEFAULT_ENDPOINT)]
     endpoint: String,
 
@@ -156,8 +158,9 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(endpoint = %endpoint, "connecting to board");
 
+    let endpoint_base = ws_base(endpoint)?;
     let transport = Arc::new(
-        WsBoardTransport::new(endpoint)
+        WsBoardTransport::new(&format!("{endpoint_base}/api/agent/link"))
             .map_err(|e| anyhow::anyhow!("endpoint: {e}"))?
             .with_insecure(cli.insecure),
     );
@@ -169,6 +172,29 @@ async fn main() -> anyhow::Result<()> {
 
     let reconnect = Duration::from_secs(cli.reconnect_interval.max(1));
     let mut first_attempt = true;
+    let mut attempt: u64 = 0;
+
+    // 自动更新：每 6 小时检查一次；面板断开连接的轮次跳过。
+    // 安装成功后退出进程（退出码 42），由服务管理器（systemd / nssm）拉起新版本。
+    // 链路快照（存活状态 + 兼容区间）由会话循环写入、更新循环读取。
+    // 仅 release 构建启动更新循环；debug 构建下不启动。
+    // 注意：watch 的所有 Sender 都 drop 后 `changed()` 会立即返回，
+    // 必须保活 sender，否则重连循环会被 restart 分支空转打断。
+    let link_state_slot = Arc::new(std::sync::RwLock::new(Default::default()));
+    let (restart_tx, mut restart_rx) = tokio::sync::watch::channel(false);
+    let _keep_restart_tx = if !cli.disable_auto_update && !cfg!(debug_assertions) {
+        tokio::spawn(sakuio_agent_core::run_update_loop(
+            VERSION.to_string(),
+            None,
+            Arc::clone(&link_state_slot),
+            move || {
+                let _ = restart_tx.send(true);
+            },
+        ));
+        None
+    } else {
+        Some(restart_tx)
+    };
 
     loop {
         if !first_attempt {
@@ -185,6 +211,8 @@ async fn main() -> anyhow::Result<()> {
         let config = AgentConfig {
             node_token: token.clone(),
             agent_version: VERSION.to_string(),
+            endpoint_base: endpoint_base.clone(),
+            link_state_slot: Arc::clone(&link_state_slot),
             telemetry_interval: Duration::from_secs_f64(cli.interval),
             info_report_interval: Duration::from_secs(cli.info_report_interval.max(1) * 60),
             max_pending_batches: 8,
@@ -192,10 +220,40 @@ async fn main() -> anyhow::Result<()> {
             disable_remote_control: cli.disable_remote_control,
         };
         let runner = AgentRunner::new(transport.clone(), config);
-        match runner.run().await {
-            Ok(()) => tracing::info!("agent session ended cleanly"),
-            Err(e) => tracing::warn!(error = %e, "agent session error, reconnecting"),
+        let started = std::time::Instant::now();
+        tokio::select! {
+            result = runner.run() => {
+                match result {
+                    Ok(()) => tracing::info!(
+                        uptime_secs = started.elapsed().as_secs(),
+                        "board session ended"
+                    ),
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        uptime_secs = started.elapsed().as_secs(),
+                        "board connection lost"
+                    ),
+                }
+            }
+            _ = restart_rx.changed() => {
+                if *restart_rx.borrow() {
+                    tracing::info!("update installed; exiting for service manager restart");
+                    std::process::exit(sakuio_agent_core::RESTART_EXIT_CODE);
+                }
+            }
         }
+        // A cycle that ran for a while counts as a healthy connection;
+        // consecutive short-lived failures bump the retry attempt counter.
+        // 持续了一段时间的会话视为一次健康连接；短暂即失败的轮次累计重试次数。
+        if started.elapsed() >= Duration::from_secs(30) {
+            attempt = 0;
+        }
+        attempt += 1;
+        tracing::info!(
+            attempt,
+            delay_secs = reconnect.as_secs(),
+            "retrying connection to board"
+        );
         tokio::time::sleep(reconnect).await;
     }
 }
