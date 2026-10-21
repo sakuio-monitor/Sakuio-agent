@@ -12,6 +12,9 @@
 #                 [-IncludeNics "eth0,eth1"] [-ExcludeNics "docker0"]
 #                 [-IncludeMountpoints "C:\,D:\"] [-MonthlyResetDay DAY]
 #   .\install.ps1 -Uninstall [-ServiceName NAME] [-InstallDir DIR]
+#
+# 服务用 nssm 包装（与 Komari 一致）：agent 本身不实现 Windows 服务控制协议（SCM），
+# 裸 New-Service 注册的 exe 无法通过 Start-Service 启动；nssm 自己对接 SCM 并守护子进程。
 
 param(
     [Alias("e")]
@@ -46,13 +49,17 @@ $DefaultService = "sakuio-agent"
 if (-not $InstallDir) { $InstallDir = $DefaultDir }
 if (-not $ServiceName) { $ServiceName = $DefaultService }
 
+$NssmExe = Join-Path $InstallDir "nssm.exe"
+
 function Invoke-Uninstall {
-    $exe = Join-Path $InstallDir "sakuio-agent.exe"
-    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    if ($service) {
-        if ($service.Status -ne "Stopped") { Stop-Service -Name $ServiceName -Force }
+    if (Test-Path $NssmExe) { & $NssmExe stop $ServiceName 2>$null | Out-Null }
+    & $NssmExe remove $ServiceName confirm 2>$null | Out-Null
+    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if ($svc) {
+        if ($svc.Status -ne "Stopped") { Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue }
         sc.exe delete $ServiceName | Out-Null
     }
+    $exe = Join-Path $InstallDir "sakuio-agent.exe"
     if (Test-Path $exe) { Remove-Item -Force $exe }
     if ((Test-Path $InstallDir) -and -not (Get-ChildItem $InstallDir)) {
         Remove-Item -Force $InstallDir
@@ -110,16 +117,53 @@ Write-Host "Downloading $Asset (v$Version) ..."
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Invoke-WebRequest -Uri $DownloadUrl -UseBasicParsing -OutFile $ExePath
 
-# (Re)install the Windows service
-$existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if ($existing) {
-    if ($existing.Status -ne "Stopped") { Stop-Service -Name $ServiceName -Force }
+# --- nssm setup (wraps the agent for the Windows Service Control Manager) ---
+New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+$env:Path = "$InstallDir;$env:Path"
+$hasNssm = $false
+if (Test-Path $NssmExe) {
+    try { & $NssmExe version | Out-Null; $hasNssm = $true } catch { $hasNssm = $false }
+}
+if (-not $hasNssm) {
+    $NssmVersion = "2.24"
+    $ZipUrl = "https://nssm.cc/release/nssm-$NssmVersion.zip"
+    $TempZip = Join-Path $env:TEMP "nssm-$NssmVersion.zip"
+    $TempDir = Join-Path $env:TEMP "sakuio_nssm_extract"
+    try {
+        Write-Host "Downloading nssm from $ZipUrl ..."
+        Invoke-WebRequest -Uri $ZipUrl -OutFile $TempZip -UseBasicParsing
+        if (Test-Path $TempDir) { Remove-Item -Recurse -Force $TempDir }
+        Expand-Archive -Path $TempZip -DestinationPath $TempDir -Force
+        # win32 build of nssm works for amd64/arm64 PowerShell
+        $src = Join-Path (Join-Path $TempDir "nssm-$NssmVersion") "win32\nssm.exe"
+        if (-not (Test-Path $src)) {
+            $found = Get-ChildItem -Path $TempDir -Recurse -Filter "nssm.exe" | Select-Object -First 1
+            if ($found) { $src = $found.FullName }
+        }
+        if (-not (Test-Path $src)) { throw "nssm.exe not found in archive" }
+        Copy-Item -Path $src -Destination $NssmExe -Force
+    }
+    finally {
+        if (Test-Path $TempZip) { Remove-Item -Force $TempZip -ErrorAction SilentlyContinue }
+        if (Test-Path $TempDir) { Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue }
+    }
+}
+
+# Remove any previous installation of the service
+$svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+if ($svc) {
+    if ($svc.Status -ne "Stopped") { Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue }
     sc.exe delete $ServiceName | Out-Null
     Start-Sleep -Seconds 1
 }
 
-$binPath = "`"$ExePath`" $($AgentArgs -join ' ')"
-New-Service -Name $ServiceName -BinaryPathName $binPath -DisplayName "Sakuio Agent" -StartupType Automatic | Out-Null
-Start-Service -Name $ServiceName
+# Register and start the service via nssm
+$argString = $AgentArgs -join " "
+& $NssmExe install $ServiceName $ExePath $argString | Out-Null
+& $NssmExe set $ServiceName DisplayName "Sakuio Agent" | Out-Null
+& $NssmExe set $ServiceName Start SERVICE_AUTO_START | Out-Null
+& $NssmExe set $ServiceName AppExit Default Restart | Out-Null
+& $NssmExe set $ServiceName AppRestartDelay 5000 | Out-Null
+& $NssmExe start $ServiceName
 
-Write-Host "sakuio-agent v$Version installed as service '$ServiceName'."
+Write-Host "sakuio-agent v$Version installed as nssm service '$ServiceName'."
