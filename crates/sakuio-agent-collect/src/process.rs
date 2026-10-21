@@ -1,7 +1,7 @@
 use crate::config::CollectConfig;
 use std::process::Command;
 
-pub fn process_count(cfg: &CollectConfig) -> i32 {
+pub fn process_count(_cfg: &CollectConfig) -> i32 {
     #[cfg(target_os = "linux")]
     {
         return process_count_linux(cfg);

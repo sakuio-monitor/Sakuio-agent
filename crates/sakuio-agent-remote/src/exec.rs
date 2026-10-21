@@ -1,6 +1,8 @@
 use futures_util::SinkExt;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+#[cfg(not(windows))]
+use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 

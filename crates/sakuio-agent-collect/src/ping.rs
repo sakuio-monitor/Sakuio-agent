@@ -21,7 +21,7 @@ pub fn run_ping(ping_type: &str, target: &str) -> i32 {
 }
 
 fn measure_with_retries(ping_type: &str, target: &str, measure: fn(&str) -> Result<i64, String>) -> Result<i64, String> {
-    let mut latency = measure(target)?;
+    let latency = measure(target)?;
     if latency <= HIGH_LATENCY_MS {
         return Ok(latency);
     }

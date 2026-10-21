@@ -88,7 +88,7 @@ mod darwin {
     use std::ffi::CStr;
     use std::mem::{size_of, zeroed};
 
-    extern "C" {
+    unsafe extern "C" {
         static vm_kernel_page_size: libc::vm_size_t;
     }
 
@@ -100,14 +100,16 @@ mod darwin {
 
     unsafe fn sysctl_value<T>(name: &CStr, out: &mut T) -> bool {
         let mut len = size_of::<T>();
-        libc::sysctlbyname(
-            name.as_ptr(),
-            out as *mut T as *mut libc::c_void,
-            &mut len,
-            std::ptr::null_mut(),
-            0,
-        ) == 0
-            && len == size_of::<T>()
+        // SAFETY: raw sysctl query; caller guarantees `out` is a valid `T`.
+        unsafe {
+            libc::sysctlbyname(
+                name.as_ptr(),
+                out as *mut T as *mut libc::c_void,
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            ) == 0
+        } && len == size_of::<T>()
     }
 
     /// Same accounting as gopsutil `mem.VirtualMemory()` on darwin.

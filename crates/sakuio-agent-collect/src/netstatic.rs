@@ -118,7 +118,7 @@ fn merge_nics_from_collect_cfg(cfg: &mut NetStaticConfig, collect: &CollectConfi
     }
 }
 
-fn background_loop(path: PathBuf, detect_secs: f64, save_secs: f64) {
+fn background_loop(_path: PathBuf, detect_secs: f64, save_secs: f64) {
     let detect = Duration::from_secs_f64(detect_secs.max(0.5));
     let save_every = Duration::from_secs_f64(save_secs.max(1.0));
     let mut last_save = SystemTime::now();
