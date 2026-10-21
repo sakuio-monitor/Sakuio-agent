@@ -33,9 +33,9 @@ jobs:
           - { os: ubuntu-24.04, target: armv7-unknown-linux-gnueabihf, asset: sakuio-agent-linux-arm, zig: true }
           - { os: ubuntu-24.04, target: loongarch64-unknown-linux-gnu, asset: sakuio-agent-linux-loong64, zig: true }
           - { os: ubuntu-24.04, target: riscv64gc-unknown-linux-gnu, asset: sakuio-agent-linux-riscv64, zig: true }
-          # ---- Linux MIPS（zig 不支持 MIPS；musl 目标 self-contained，用内置 rust-lld）----
-          - { os: ubuntu-24.04, target: mips-unknown-linux-musl, asset: sakuio-agent-linux-mips, zig: false }
-          - { os: ubuntu-24.04, target: mipsel-unknown-linux-musl, asset: sakuio-agent-linux-mipsel, zig: false }
+          # ---- Linux MIPS（zig 不支持 MIPS；Rust ≥1.86 已移除 mips std，钉 1.85 工具链）----
+          - { os: ubuntu-24.04, target: mips-unknown-linux-musl, asset: sakuio-agent-linux-mips, zig: false, toolchain: "1.85.0" }
+          - { os: ubuntu-24.04, target: mipsel-unknown-linux-musl, asset: sakuio-agent-linux-mipsel, zig: false, toolchain: "1.85.0" }
           # ---- macOS（原生工具链交叉两个架构）----
           - { os: macos-14, target: aarch64-apple-darwin, asset: sakuio-agent-darwin-arm64, zig: false }
           - { os: macos-14, target: x86_64-apple-darwin, asset: sakuio-agent-darwin-amd64, zig: false }
@@ -58,9 +58,14 @@ jobs:
         shell: bash
         run: ln -s "$GITHUB_WORKSPACE/sakuio" "$(dirname "$GITHUB_WORKSPACE")/sakuio"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ matrix.toolchain || 'stable' }}
           targets: ${{ matrix.target }}
+
+      - name: Install zig
+        if: matrix.zig
+        uses: mlugg/setup-zig@v1
 
       - name: Install cargo-zigbuild
         if: matrix.zig

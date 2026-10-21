@@ -99,30 +99,34 @@ fn stored_token(state: &PathBuf) -> Option<String> {
 /// consumed by the collector (`CollectConfig::default`).
 /// 把安装选项映射到采集器读取的 `SAKUIO_AGENT_*` 环境变量。
 fn apply_collect_env(cli: &Cli) {
-    if cli.include_buffer_memory {
-        std::env::set_var("SAKUIO_AGENT_MEMORY_INCLUDE_CACHE", "1");
-    }
-    if cli.ip_from_nic {
-        std::env::set_var("SAKUIO_AGENT_GET_IP_FROM_NIC", "1");
-    }
-    if cli.gpu_detail {
-        std::env::set_var("SAKUIO_AGENT_ENABLE_GPU", "1");
-    }
-    if let Some(v) = cli.include_nics.as_deref().filter(|v| !v.trim().is_empty()) {
-        std::env::set_var("SAKUIO_AGENT_INCLUDE_NICS", v.trim());
-    }
-    if let Some(v) = cli.exclude_nics.as_deref().filter(|v| !v.trim().is_empty()) {
-        std::env::set_var("SAKUIO_AGENT_EXCLUDE_NICS", v.trim());
-    }
-    if let Some(v) = cli
-        .include_mountpoints
-        .as_deref()
-        .filter(|v| !v.trim().is_empty())
-    {
-        std::env::set_var("SAKUIO_AGENT_INCLUDE_MOUNTPOINTS", v.trim());
-    }
-    if let Some(d) = cli.monthly_reset_day {
-        std::env::set_var("SAKUIO_AGENT_MONTH_ROTATE", d.to_string());
+    // SAFETY: called once from main before any worker thread reads these
+    // variables (edition 2024 marks `set_var` unsafe because of env races).
+    unsafe {
+        if cli.include_buffer_memory {
+            std::env::set_var("SAKUIO_AGENT_MEMORY_INCLUDE_CACHE", "1");
+        }
+        if cli.ip_from_nic {
+            std::env::set_var("SAKUIO_AGENT_GET_IP_FROM_NIC", "1");
+        }
+        if cli.gpu_detail {
+            std::env::set_var("SAKUIO_AGENT_ENABLE_GPU", "1");
+        }
+        if let Some(v) = cli.include_nics.as_deref().filter(|v| !v.trim().is_empty()) {
+            std::env::set_var("SAKUIO_AGENT_INCLUDE_NICS", v.trim());
+        }
+        if let Some(v) = cli.exclude_nics.as_deref().filter(|v| !v.trim().is_empty()) {
+            std::env::set_var("SAKUIO_AGENT_EXCLUDE_NICS", v.trim());
+        }
+        if let Some(v) = cli
+            .include_mountpoints
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+        {
+            std::env::set_var("SAKUIO_AGENT_INCLUDE_MOUNTPOINTS", v.trim());
+        }
+        if let Some(d) = cli.monthly_reset_day {
+            std::env::set_var("SAKUIO_AGENT_MONTH_ROTATE", d.to_string());
+        }
     }
 }
 
