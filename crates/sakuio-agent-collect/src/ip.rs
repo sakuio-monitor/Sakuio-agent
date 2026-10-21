@@ -137,7 +137,7 @@ fn get_ipv6_address() -> Option<String> {
 }
 
 fn get_ip_from_interfaces(nic_names: &[String]) -> (String, String) {
-    let Ok(interfaces) = get_if_addrs::get_if_addrs() else {
+    let Ok(interfaces) = if_addrs::get_if_addrs() else {
         return (String::new(), String::new());
     };
 
