@@ -100,7 +100,7 @@ async fn build_command() -> anyhow::Result<tokio::process::Child> {
     }
     #[cfg(not(windows))]
     {
-        let child = Command::new("sh")
+        let child = Command::new(find_unix_shell())
             .arg("-s")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -108,6 +108,27 @@ async fn build_command() -> anyhow::Result<tokio::process::Child> {
             .spawn()?;
         Ok(child)
     }
+}
+
+/// 机器上有什么 shell 用什么，都没有才退回 sh
+/// 候选均为 POSIX 兼容（支持 -s 与花括号块）：bash、zsh、ksh、mksh、dash、ash
+#[cfg(not(windows))]
+fn find_unix_shell() -> &'static str {
+    const CANDIDATES: [&str; 6] = ["bash", "zsh", "ksh", "mksh", "dash", "ash"];
+    let Ok(path) = std::env::var("PATH") else {
+        return "sh";
+    };
+    for name in CANDIDATES {
+        for dir in path.split(':') {
+            if dir.is_empty() {
+                continue;
+            }
+            if std::path::Path::new(dir).join(name).is_file() {
+                return name;
+            }
+        }
+    }
+    "sh"
 }
 
 /// Feeds the command to the child's stdin as a shell script.
