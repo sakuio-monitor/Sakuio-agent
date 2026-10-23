@@ -29,8 +29,8 @@
 
 set -euo pipefail
 
-SERVICE_NAME="sakuio-agent"
-INSTALL_DIR="/opt/sakuio-agent"
+SERVICE_NAME=""
+INSTALL_DIR=""
 GITHUB_PROXY=""
 AGENT_VERSION=""
 UNINSTALL=0
@@ -53,7 +53,8 @@ while [[ $# -gt 0 ]]; do
     --gpu-detail) EXTRA_ARGS+=("--gpu-detail"); shift ;;
     --version) AGENT_VERSION="$2"; shift 2 ;;
     --github-proxy) GITHUB_PROXY="$2"; shift 2 ;;
-    --install-dir) INSTALL_DIR="$2"; shift 2 ;;
+    --install-dir) INSTALL_DIR="$2"; DIR_EXPLICIT=1; shift 2 ;;
+    --name|--instance) SERVICE_NAME="$2"; shift 2 ;;
     --service-name) SERVICE_NAME="$2"; shift 2 ;;
     --include-nics) EXTRA_ARGS+=("--include-nics" "$2"); shift 2 ;;
     --exclude-nics) EXTRA_ARGS+=("--exclude-nics" "$2"); shift 2 ;;
@@ -66,9 +67,45 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Pick a free instance name unless the caller pinned one. This lets several
+# agents share one machine without overwriting each other's binary, state or
+# service definition.
+if [[ "$UNINSTALL" -eq 1 && -z "$SERVICE_NAME" ]]; then
+  SERVICE_NAME="sakuio-agent"
+  INSTALL_DIR="${INSTALL_DIR:-/opt/$SERVICE_NAME}"
+elif [[ -z "$SERVICE_NAME" ]]; then
+  base="sakuio-agent"
+  n=1
+  SERVICE_NAME="$base"
+  while :; do
+    if [[ -e "/etc/systemd/system/$SERVICE_NAME.service" || \
+          -e "/etc/init.d/$SERVICE_NAME" || \
+          -e "/Library/LaunchDaemons/$SERVICE_NAME.plist" ]]; then
+      n=$((n + 1))
+      SERVICE_NAME="$base-$n"
+      continue
+    fi
+    if [[ -z "${DIR_EXPLICIT:-}" && -d "/opt/$SERVICE_NAME" ]]; then
+      n=$((n + 1))
+      SERVICE_NAME="$base-$n"
+      continue
+    fi
+    break
+  done
+  if [[ -z "$INSTALL_DIR" ]]; then
+    INSTALL_DIR="/opt/$SERVICE_NAME"
+  fi
+elif [[ -z "$INSTALL_DIR" ]]; then
+  INSTALL_DIR="/opt/$SERVICE_NAME"
+fi
+
 # ---- uninstall path ----
 if [[ "$UNINSTALL" -eq 1 ]]; then
-  if command -v systemctl >/dev/null 2>&1; then
+  if command -v rc-service >/dev/null 2>&1 && [[ ! -d /run/systemd/system ]]; then
+    rc-service "$SERVICE_NAME" stop 2>/dev/null || true
+    rc-update del "$SERVICE_NAME" default 2>/dev/null || true
+    rm -f "/etc/init.d/$SERVICE_NAME"
+  elif command -v systemctl >/dev/null 2>&1; then
     systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
     rm -f "/etc/systemd/system/$SERVICE_NAME.service"
     systemctl daemon-reload 2>/dev/null || true
@@ -149,7 +186,37 @@ echo "==> installing agent v${AGENT_VERSION} (${OS}/${ARCH}) to $INSTALL_DIR"
 # 持久化令牌存放在安装目录；必须显式传绝对路径并固定工作目录，
 # 否则默认相对路径会随服务管理器的启动目录漂移。
 STATE_FILE="$INSTALL_DIR/sakuio-agent-token"
-if command -v systemctl >/dev/null 2>&1 && [[ "$(uname -s)" == "Linux" ]]; then
+if command -v rc-service >/dev/null 2>&1 && [[ ! -d /run/systemd/system ]]; then
+  # Alpine / OpenRC. Each instance has its own init script, workdir and state.
+  EXEC_ARGS=(-e "$ENDPOINT" -t "$TOKEN" --state "$STATE_FILE")
+  for a in "${EXTRA_ARGS[@]:-}"; do
+    [[ -n "$a" ]] && EXEC_ARGS+=("$a")
+  done
+  QUOTED_ARGS=""
+  for a in "${EXEC_ARGS[@]}"; do
+    QUOTED_ARGS="$QUOTED_ARGS $(printf '%q' "$a")"
+  done
+  cat > "/etc/init.d/$SERVICE_NAME" <<OPENRC
+#!/sbin/openrc-run
+name="Sakuio agent ($SERVICE_NAME)"
+command="$BIN"
+command_args="${QUOTED_ARGS# }"
+command_background=true
+pidfile="/run/$SERVICE_NAME.pid"
+output_log="/var/log/$SERVICE_NAME.log"
+error_log="/var/log/$SERVICE_NAME.log"
+
+depend() {
+  need net
+  after firewall
+}
+OPENRC
+  chmod +x "/etc/init.d/$SERVICE_NAME"
+  rc-update add "$SERVICE_NAME" default
+  rc-service "$SERVICE_NAME" restart
+  echo "==> service '$SERVICE_NAME' started (OpenRC)"
+  rc-service "$SERVICE_NAME" status || true
+elif command -v systemctl >/dev/null 2>&1 && [[ "$(uname -s)" == "Linux" ]]; then
   EXEC_LINE="$BIN -e \"$ENDPOINT\" -t \"$TOKEN\" --state \"$STATE_FILE\""
   for a in "${EXTRA_ARGS[@]:-}"; do
     [[ -n "$a" ]] && EXEC_LINE="$EXEC_LINE \"$a\""
@@ -212,4 +279,5 @@ else
   exit 1
 fi
 
-echo "==> done. The node should appear online in the admin console shortly."
+echo "==> done. Instance '$SERVICE_NAME' installed in $INSTALL_DIR."
+echo "    The node should appear online in the admin console shortly."

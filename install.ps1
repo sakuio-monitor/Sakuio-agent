@@ -19,8 +19,10 @@ $UninstallOnly = $false
 # Parse script arguments
 for ($i = 0; $i -lt $args.Count; $i++) {
     switch ($args[$i]) {
-        "--install-dir" { $InstallDir = $args[$i + 1]; $i++; continue }
-        "--install-service-name" { $ServiceName = $args[$i + 1]; $i++; continue }
+        "--install-dir" { $InstallDir = $args[$i + 1]; $DirExplicit = $true; $i++; continue }
+        "--install-service-name" { $ServiceName = $args[$i + 1]; $ServiceExplicit = $true; $i++; continue }
+        "--name" { $ServiceName = $args[$i + 1]; $ServiceExplicit = $true; $i++; continue }
+        "--service-name" { $ServiceName = $args[$i + 1]; $ServiceExplicit = $true; $i++; continue }
         "--install-ghproxy" { $GitHubProxy = $args[$i + 1]; $i++; continue }
         "--install-version" { $InstallVersion = $args[$i + 1]; $i++; continue }
         "--uninstall" { $UninstallOnly = $true; continue }
@@ -189,6 +191,26 @@ catch {
     exit 1
 }
 
+# Multiple agents can coexist: derive a free service/directory unless pinned.
+if ($UninstallOnly -and -not $ServiceExplicit) {
+    $ServiceName = "sakuio-agent"
+    if (-not $DirExplicit) {
+        $InstallDir = Join-Path $Env:ProgramFiles $ServiceName
+    }
+}
+elseif (-not $ServiceExplicit) {
+    $n = 1
+    $baseName = "sakuio-agent"
+    $ServiceName = $baseName
+    while (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
+        $n++
+        $ServiceName = "$baseName-$n"
+    }
+    if (-not $DirExplicit) {
+        $InstallDir = Join-Path $Env:ProgramFiles $ServiceName
+    }
+}
+
 if ($UninstallOnly) {
     Log-Step "Uninstalling service..."
     nssm stop $ServiceName 2>$null | Out-Null
@@ -257,7 +279,8 @@ function Uninstall-Previous {
         Remove-Item $AgentPath -Force
     }
 }
-Uninstall-Previous
+# Do not remove an existing service on install: a second agent must be able to
+# use a different service name and directory without touching the first.
 
 $versionToInstall = ""
 if ($InstallVersion -ne "") {
@@ -306,6 +329,10 @@ if (-not ($AgentArgs | Where-Object { $_ -eq "--state" })) {
     $AgentArgs += @("--state", $StateFile)
 }
 $argString = $AgentArgs -join ' '
+# Upgrade only the selected instance; other instances keep running.
+if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
+    Uninstall-Previous
+}
 # The application path is passed WITHOUT literal quotes: PowerShell already
 # quotes native arguments containing spaces on the command line, while
 # embedded quotes made nssm store a broken Application path.

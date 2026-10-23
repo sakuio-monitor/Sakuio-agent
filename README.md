@@ -37,6 +37,43 @@ cargo run -p sakuio-agent
 - `-i, --interval` 采集间隔（秒）
 - `--monthly-reset-day` 网络统计月重置日
 
+## 同机多实例
+
+默认会自动选择空闲实例名和目录：
+
+```text
+sakuio-agent      /opt/sakuio-agent
+sakuio-agent-2    /opt/sakuio-agent-2
+sakuio-agent-3    /opt/sakuio-agent-3
+```
+
+也可以显式指定：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio-agent/main/install.sh \
+  | sudo bash -s -- -e wss://panel-b.example.com -t <token> --name sakuio-agent-b
+```
+
+每个实例拥有独立的二进制、状态文件、systemd/OpenRC/launchd 服务，不会覆盖已有 Agent。
+
+Windows：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1 -e wss://panel-b.example.com -t <token> --name sakuio-agent-b
+```
+
+## Alpine / OpenRC
+
+Alpine 需要先安装 bash 和 curl：
+
+```bash
+apk add --no-cache bash curl ca-certificates
+curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio-agent/main/install.sh \
+  | sudo bash -s -- -e wss://panel.example.com -t <token>
+```
+
+脚本会自动识别 OpenRC，并写入 `/etc/init.d/sakuio-agent[-N]`。
+
 ## 发布
 
 推送 `v*` tag 自动交叉构建全部目标并发布 Release
