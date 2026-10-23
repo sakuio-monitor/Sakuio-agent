@@ -6,7 +6,7 @@ use sakuio_agent_remote::{
 };
 use crate::update::BoardLinkSnapshot;
 use sakuio_protocol::{
-    AgentPingParams, ControlMessage, ControlOp, HelloParams, RemoteExecOpen, RemoteFileCommand,
+    AgentPingParams, ConfigParams, ControlMessage, ControlOp, HelloParams, RemoteExecOpen, RemoteFileCommand,
     RemoteFileResult, RemoteShellOpen, RemoteStreamRead, RemoteStreamWrite, SyncCommandItem,
     SyncReqParams, SyncRespParams, TelemetryBatch, WelcomeParams, METHOD_AGENT_PING,
     METHOD_AGENT_PING_RESULT, METHOD_REMOTE_EXEC, METHOD_REMOTE_EXEC_RESULT, METHOD_REMOTE_FILE,
@@ -110,7 +110,10 @@ impl AgentRunner {
             .map_err(|e| anyhow::anyhow!("basic_info send: {e}"))?;
 
         let mut collect_state = CollectState::default();
-        let mut ticker = interval(self.config.telemetry_interval);
+        let mut telemetry_interval =
+            effective_interval(welcome.telemetry_interval_ms, self.config.telemetry_interval);
+        sakuio_agent_collect::set_report_interval_ms(telemetry_interval.as_millis() as u64);
+        let mut ticker = interval(telemetry_interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut info_ticker = interval(self.config.info_report_interval);
         info_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -168,7 +171,7 @@ impl AgentRunner {
                         anyhow::bail!("board session closed");
                     };
                     if let BoardFrame::Control(msg) = frame {
-                        command_cursor = self
+                        let (cursor, new_interval) = self
                             .handle_control(
                                 &mut session,
                                 msg,
@@ -177,6 +180,19 @@ impl AgentRunner {
                                 &mut command_cursor,
                             )
                             .await?;
+                        command_cursor = cursor;
+                        if let Some(new_interval) = new_interval {
+                            telemetry_interval = new_interval;
+                            sakuio_agent_collect::set_report_interval_ms(
+                                telemetry_interval.as_millis() as u64,
+                            );
+                            ticker = interval(telemetry_interval);
+                            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+                            tracing::info!(
+                                interval_ms = telemetry_interval.as_millis() as u64,
+                                "telemetry interval updated by board"
+                            );
+                        }
                     }
                 }
             }
@@ -242,7 +258,7 @@ impl AgentRunner {
                     let welcome: WelcomeParams = serde_json::from_value(msg.p)?;
                     tracing::info!(
                         session_id = %welcome.session_id,
-                        interval_ms = self.config.telemetry_interval.as_millis() as u64,
+                        interval_ms = effective_interval(welcome.telemetry_interval_ms, self.config.telemetry_interval).as_millis() as u64,
                         "welcome received"
                     );
                     return Ok(welcome);
@@ -272,10 +288,17 @@ impl AgentRunner {
         pending_acks: &mut u32,
         ping_tx: &mpsc::UnboundedSender<ControlMessage>,
         command_cursor: &mut u64,
-    ) -> anyhow::Result<u64> {
+    ) -> anyhow::Result<(u64, Option<Duration>)> {
+        let mut new_interval = None;
         match msg.op {
             ControlOp::TelemetryAck => {
                 *pending_acks = pending_acks.saturating_sub(1);
+            }
+            ControlOp::Config => {
+                let params: ConfigParams = serde_json::from_value(msg.p)?;
+                new_interval = Some(Duration::from_millis(
+                    params.telemetry_interval_ms.clamp(200, 3_600_000),
+                ));
             }
             ControlOp::Heartbeat => {
                 session
@@ -361,7 +384,7 @@ impl AgentRunner {
                 tracing::debug!(?other, "ignored control message");
             }
         }
-        Ok(*command_cursor)
+        Ok((*command_cursor, new_interval))
     }
 
     fn spawn_ping(
@@ -513,5 +536,15 @@ impl AgentRunner {
             let _ = result_tx.send(msg);
         });
         Ok(())
+    }
+}
+
+/// Resolves the board-provided interval, falling back to the local CLI value.
+/// 解析面板下发的间隔，缺省时回退到本地 CLI 值。
+fn effective_interval(board_ms: u64, fallback: Duration) -> Duration {
+    if board_ms == 0 {
+        fallback
+    } else {
+        Duration::from_millis(board_ms.clamp(200, 3_600_000))
     }
 }
