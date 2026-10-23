@@ -26,13 +26,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ---- Linux（zig 交叉编译）----
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, asset: sakuio-agent-linux-amd64, zig: true }
-          - { os: ubuntu-24.04, target: i686-unknown-linux-gnu, asset: sakuio-agent-linux-386, zig: true }
-          - { os: ubuntu-24.04, target: aarch64-unknown-linux-gnu, asset: sakuio-agent-linux-arm64, zig: true }
-          - { os: ubuntu-24.04, target: armv7-unknown-linux-gnueabihf, asset: sakuio-agent-linux-arm, zig: true }
-          - { os: ubuntu-24.04, target: loongarch64-unknown-linux-gnu, asset: sakuio-agent-linux-loong64, zig: true }
-          - { os: ubuntu-24.04, target: riscv64gc-unknown-linux-gnu, asset: sakuio-agent-linux-riscv64, zig: true }
+          # ---- Linux（zig + musl 静态链接）----
+          # 不依赖 glibc 版本；同一资产可在旧版和新版发行版直接运行。
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl, asset: sakuio-agent-linux-amd64, zig: true }
+          - { os: ubuntu-24.04, target: i686-unknown-linux-musl, asset: sakuio-agent-linux-386, zig: true }
+          - { os: ubuntu-24.04, target: aarch64-unknown-linux-musl, asset: sakuio-agent-linux-arm64, zig: true }
+          - { os: ubuntu-24.04, target: armv7-unknown-linux-musleabihf, asset: sakuio-agent-linux-arm, zig: true }
+          - { os: ubuntu-24.04, target: loongarch64-unknown-linux-musl, asset: sakuio-agent-linux-loong64, zig: true }
+          - { os: ubuntu-24.04, target: riscv64gc-unknown-linux-musl, asset: sakuio-agent-linux-riscv64, zig: true }
           # MIPS：Rust 上游已移除 mips 预编译 std（新版 rustup 对旧通道也拒绝下载），
           # 且 zig 不支持 MIPS，暂不提供，见 docs/CICD.md。
           # ---- macOS（原生工具链交叉两个架构）----
@@ -78,10 +79,23 @@ jobs:
         if: matrix.zig
         uses: taiki-e/install-action@cargo-zigbuild
 
-      - name: Build (zig)
+      - name: Build (zig, static musl)
         if: matrix.zig
         shell: bash
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
         run: cargo zigbuild --release --target ${{ matrix.target }} -p sakuio-agent
+
+      - name: Verify static musl binary
+        if: matrix.zig
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.target }}/release/sakuio-agent"
+          file "$BIN"
+          if file "$BIN" | grep -qi "dynamically linked"; then
+            echo "::error::expected static musl binary, got dynamic executable"
+            exit 1
+          fi
 
       - name: Build (native toolchain)
         if: ${{ !matrix.zig }}

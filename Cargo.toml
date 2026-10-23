@@ -40,3 +40,11 @@ ureq = { version = "2.10", default-features = false, features = ["tls"] }
 
 sakuio-protocol = { path = "../sakuio/crates/sakuio-protocol" }
 sakuio-board = { path = "../sakuio/crates/sakuio-board" }
+
+# Conservative size reduction: no panic=abort, no opt-level=z.
+# These settings do not change telemetry sampling or numeric precision.
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true
