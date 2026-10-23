@@ -6,10 +6,10 @@ use sakuio_agent_remote::{
 };
 use crate::update::{run_forced_update, BoardLinkSnapshot, RESTART_EXIT_CODE};
 use sakuio_protocol::{
-    AgentPingParams, AgentUpdateParams, ConfigParams, ControlMessage, ControlOp, HelloParams,
+    AgentPingBatchParams, AgentPingParams, AgentUpdateParams, ConfigParams, ControlMessage, ControlOp, HelloParams,
     RemoteExecOpen, RemoteFileCommand, RemoteFileResult, RemoteShellOpen, RemoteStreamRead,
     RemoteStreamWrite, SyncCommandItem, SyncReqParams, SyncRespParams, TelemetryBatch, WelcomeParams,
-    METHOD_AGENT_PING, METHOD_AGENT_PING_RESULT, METHOD_AGENT_UPDATE, METHOD_REMOTE_EXEC,
+    METHOD_AGENT_PING, METHOD_AGENT_PING_BATCH, METHOD_AGENT_PING_RESULT, METHOD_AGENT_UPDATE, METHOD_REMOTE_EXEC,
     METHOD_REMOTE_EXEC_RESULT, METHOD_REMOTE_FILE,
     METHOD_REMOTE_FILE_RESULT, METHOD_REMOTE_SHELL, METHOD_REMOTE_STREAM_READ,
     METHOD_REMOTE_STREAM_WRITE,
@@ -74,12 +74,14 @@ impl AgentRunner {
                     "telemetry".into(),
                     "basic_info".into(),
                     "ping".into(),
+                "pingBatch".into(),
                 ]
             } else {
                 vec![
                     "telemetry".into(),
                     "basic_info".into(),
                     "ping".into(),
+                "pingBatch".into(),
                     "remote.file".into(),
                     "remote.shell".into(),
                     "remote.exec".into(),
@@ -233,6 +235,7 @@ impl AgentRunner {
                 "telemetry".into(),
                 "basic_info".into(),
                 "ping".into(),
+                "pingBatch".into(),
                 "remote.file".into(),
                 "remote.shell".into(),
                 "remote.exec".into(),
@@ -317,6 +320,8 @@ impl AgentRunner {
                     *command_cursor = (*command_cursor).max(item.cursor);
                     if item.method == METHOD_AGENT_PING {
                         self.spawn_ping(ping_tx.clone(), item)?;
+                    } else if item.method == METHOD_AGENT_PING_BATCH {
+                        self.spawn_ping_batch(ping_tx.clone(), item)?;
                     } else if item.method == METHOD_AGENT_UPDATE {
                         self.spawn_agent_update(item.payload)?;
                     } else if item.method == METHOD_REMOTE_FILE {
@@ -346,6 +351,13 @@ impl AgentRunner {
                         payload,
                     };
                     self.spawn_ping(ping_tx.clone(), item)?;
+                } else if method == METHOD_AGENT_PING_BATCH {
+                    let item = SyncCommandItem {
+                        cursor: 0,
+                        method: method.to_string(),
+                        payload,
+                    };
+                    self.spawn_ping_batch(ping_tx.clone(), item)?;
                 } else if method == METHOD_AGENT_UPDATE {
                     self.spawn_agent_update(payload)?;
                 } else if method == METHOD_REMOTE_FILE {
@@ -443,6 +455,25 @@ impl AgentRunner {
             );
             let _ = ping_tx.send(msg);
         });
+        Ok(())
+    }
+
+    fn spawn_ping_batch(
+        &self,
+        ping_tx: mpsc::UnboundedSender<ControlMessage>,
+        item: SyncCommandItem,
+    ) -> anyhow::Result<()> {
+        let params: AgentPingBatchParams = serde_json::from_value(item.payload)?;
+        for task in params.tasks {
+            self.spawn_ping(
+                ping_tx.clone(),
+                SyncCommandItem {
+                    cursor: item.cursor,
+                    method: METHOD_AGENT_PING.to_string(),
+                    payload: serde_json::to_value(task)?,
+                },
+            )?;
+        }
         Ok(())
     }
 
