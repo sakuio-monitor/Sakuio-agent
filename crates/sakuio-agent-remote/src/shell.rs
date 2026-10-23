@@ -121,6 +121,43 @@ impl ShellBridge {
     }
 }
 
+fn is_executable(path: &str) -> bool {
+    std::fs::metadata(path).map(|meta| meta.is_file()).unwrap_or(false)
+}
+
+fn shell_from_passwd() -> Option<String> {
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .ok()?;
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    passwd.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.first().copied() != Some(user.as_str()) {
+            return None;
+        }
+        let shell = fields.get(6).copied()?.trim();
+        (is_executable(shell) && shell != "/bin/false" && shell != "/usr/sbin/nologin")
+            .then(|| shell.to_string())
+    })
+}
+
+fn first_usable_shell() -> Option<String> {
+    for shell in [
+        "/bin/bash",
+        "/usr/bin/bash",
+        "/bin/zsh",
+        "/usr/bin/zsh",
+        "/bin/sh",
+        "/usr/bin/sh",
+        "/bin/ash",
+    ] {
+        if is_executable(shell) {
+            return Some(shell.to_string());
+        }
+    }
+    None
+}
+
 fn default_shell() -> String {
     #[cfg(windows)]
     {
@@ -128,6 +165,33 @@ fn default_shell() -> String {
     }
     #[cfg(not(windows))]
     {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+        // systemd often sets SHELL=/bin/sh even when the account uses bash.
+        // Prefer the account shell from passwd, then the environment shell,
+        // then common interactive shells.
+        if let Some(shell) = shell_from_passwd() {
+            return shell;
+        }
+        if let Ok(shell) = std::env::var("SHELL") {
+            if is_executable(&shell) && shell != "/bin/sh" {
+                return shell;
+            }
+        }
+        first_usable_shell().unwrap_or_else(|| "/bin/sh".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skips_missing_shell_paths() {
+        assert!(!is_executable("/definitely/not/a/shell"));
+    }
+
+    #[test]
+    fn has_a_shell_on_this_platform() {
+        #[cfg(not(windows))]
+        assert!(is_executable(&default_shell()));
     }
 }
