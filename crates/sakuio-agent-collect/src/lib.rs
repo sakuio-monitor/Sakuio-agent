@@ -26,3 +26,9 @@ mod virt;
 pub use config::CollectConfig;
 pub use ping::run_ping;
 pub use report::{CollectState, HostStaticInfo, Reporter};
+
+/// Applies the board-reported telemetry interval to all realtime collectors.
+/// 把面板下发的遥测间隔应用到所有实时采集器。
+pub fn set_report_interval_ms(ms: u64) {
+    netstatic::set_detect_interval_ms(ms);
+}

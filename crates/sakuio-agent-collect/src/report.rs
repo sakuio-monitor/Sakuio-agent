@@ -1,8 +1,7 @@
 use crate::config::CollectConfig;
 use crate::{connections, cpu, disk, gpu, ip, load, mem, net, os, process, virt};
 use sakuio_protocol::{
-    BasicInfoParams, ConnectionsReport, CpuReport, NetworkReport, TelemetrySample,
-    UsageReport,
+    BasicInfoParams, ConnectionsReport, CpuReport, NetworkReport, TelemetrySample, UsageReport,
 };
 use sysinfo::System;
 
@@ -14,8 +13,11 @@ pub struct CollectState {
 
 impl Default for CollectState {
     fn default() -> Self {
-        let mut sys = System::new_all();
-        sys.refresh_all();
+        // Only CPU state is needed for per-sample usage; `new_all()` would
+        // retain every process/disk/user entry for the whole agent lifetime.
+        // 采样只需要 CPU 状态；`new_all()` 会把全部进程/磁盘/用户条目常驻内存。
+        let mut sys = System::new();
+        sys.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing().with_cpu_usage());
         Self { sys }
     }
 }

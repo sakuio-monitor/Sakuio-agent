@@ -57,7 +57,34 @@ mod platform {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(target_os = "macos")]
+mod platform {
+    use super::NicCounter;
+    use crate::config::CollectConfig;
+    use parking_lot::Mutex;
+    use std::sync::LazyLock;
+    use sysinfo::Networks;
+
+    /// `sysinfo` reads counters through getifaddrs on macOS; no subprocess.
+    /// `sysinfo` 在 macOS 通过 getifaddrs 读取计数，无需子进程。
+    static NETWORKS: LazyLock<Mutex<Networks>> =
+        LazyLock::new(|| Mutex::new(Networks::new_with_refreshed_list()));
+
+    pub fn io_counters(_cfg: &CollectConfig) -> Result<Vec<NicCounter>, String> {
+        let mut networks = NETWORKS.lock();
+        networks.refresh(true);
+        Ok(networks
+            .iter()
+            .map(|(name, data)| NicCounter {
+                name: name.clone(),
+                rx: data.total_received(),
+                tx: data.total_transmitted(),
+            })
+            .collect())
+    }
+}
+
+#[cfg(target_os = "freebsd")]
 mod platform {
     use super::NicCounter;
     use crate::config::CollectConfig;
@@ -86,7 +113,8 @@ mod platform {
         if v == "-" {
             return Ok(0);
         }
-        v.parse::<u64>().map_err(|e| format!("netstat value {v:?}: {e}"))
+        v.parse::<u64>()
+            .map_err(|e| format!("netstat value {v:?}: {e}"))
     }
 
     fn parse_line(line: &str) -> Result<Option<Row>, String> {

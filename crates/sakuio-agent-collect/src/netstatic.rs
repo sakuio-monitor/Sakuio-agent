@@ -5,6 +5,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_DATA_PRESERVE_DAY: f64 = 30.0;
@@ -82,6 +83,17 @@ struct NetStaticRuntime {
 static RUNTIME: once_cell::sync::Lazy<Mutex<Option<NetStaticRuntime>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(None));
 
+/// Sampling cadence for monthly traffic counters, follows the board-reported
+/// telemetry interval so all realtime collection shares one cadence.
+/// 月度流量计数的采样节奏，跟随面板下发的遥测间隔。
+static DETECT_MS: AtomicU64 = AtomicU64::new(DEFAULT_DETECT_INTERVAL as u64 * 1000);
+
+/// Updates the counter sampling cadence (milliseconds).
+/// 更新计数采样间隔（毫秒）。
+pub fn set_detect_interval_ms(ms: u64) {
+    DETECT_MS.store(ms.clamp(200, 3_600_000), Ordering::Relaxed);
+}
+
 pub fn ensure_running(cfg: &CollectConfig) {
     let mut guard = RUNTIME.lock();
     if guard.as_ref().is_some_and(|r| r.running) {
@@ -103,6 +115,9 @@ pub fn ensure_running(cfg: &CollectConfig) {
         .as_ref()
         .map(|r| r.store.config.detect_interval)
         .unwrap_or(DEFAULT_DETECT_INTERVAL);
+    // The board pushes the effective telemetry interval before the first
+    // sample; do not overwrite it with the local config default here.
+    // 面板会在首次采样前下发有效遥测间隔，这里不能用本地默认值覆盖。
     let save_secs = guard
         .as_ref()
         .map(|r| r.store.config.save_interval)
@@ -118,12 +133,13 @@ fn merge_nics_from_collect_cfg(cfg: &mut NetStaticConfig, collect: &CollectConfi
     }
 }
 
-fn background_loop(_path: PathBuf, detect_secs: f64, save_secs: f64) {
-    let detect = Duration::from_secs_f64(detect_secs.max(0.5));
+fn background_loop(_path: PathBuf, _detect_secs: f64, save_secs: f64) {
     let save_every = Duration::from_secs_f64(save_secs.max(1.0));
     let mut last_save = SystemTime::now();
     loop {
-        std::thread::sleep(detect);
+        std::thread::sleep(Duration::from_millis(
+            DETECT_MS.load(Ordering::Relaxed),
+        ));
         {
             let mut guard = RUNTIME.lock();
             let Some(rt) = guard.as_mut() else {

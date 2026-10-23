@@ -1,5 +1,5 @@
 use crate::config::CollectConfig;
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(target_os = "freebsd")]
 use std::process::Command;
 
 pub fn process_count(cfg: &CollectConfig) -> i32 {
@@ -60,15 +60,33 @@ fn process_count_linux(cfg: &CollectConfig) -> i32 {
 
 #[cfg(target_os = "macos")]
 fn process_count_darwin() -> i32 {
-    let Ok(out) = Command::new("ps").arg("-A").output() else {
-        return 0;
-    };
-    if !out.status.success() {
-        return 0;
+    // `proc_listpids` avoids spawning `ps` and building its output string on
+    // every sample. PROC_ALL_PIDS == 1.
+    // `proc_listpids` 避免每次采样都启动 `ps` 并构造输出字符串。
+    const PROC_ALL_PIDS: u32 = 1;
+    let mut buffer: Vec<u32> = vec![0; 1024];
+    loop {
+        let bytes = std::mem::size_of_val(buffer.as_slice());
+        let written = unsafe {
+            libc::proc_listpids(
+                PROC_ALL_PIDS,
+                0,
+                buffer.as_mut_ptr().cast(),
+                bytes as libc::c_int,
+            )
+        };
+        if written <= 0 {
+            return 0;
+        }
+        let written = written as usize;
+        if written < bytes {
+            return i32::try_from(written / std::mem::size_of::<u32>()).unwrap_or(0);
+        }
+        buffer.resize(buffer.len() * 2, 0);
+        if buffer.len() > 1 << 20 {
+            return 0;
+        }
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let line_count = text.lines().count();
-    i32::try_from(line_count.saturating_sub(1)).unwrap_or(0)
 }
 
 #[cfg(target_os = "freebsd")]

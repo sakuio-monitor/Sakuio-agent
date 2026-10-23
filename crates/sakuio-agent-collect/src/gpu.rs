@@ -56,9 +56,9 @@ struct DetailedGpu {
 
 #[cfg(target_os = "linux")]
 mod platform_impl {
+    use super::rocm_smi;
     use super::DetailedGpu;
     use crate::nvidia_smi;
-    use super::rocm_smi;
     use once_cell::sync::Lazy;
     use regex::Regex;
     use std::collections::HashMap;
@@ -128,7 +128,14 @@ mod platform_impl {
             r"(?i)hyper-v",
         ];
         let priority = [
-            "nvidia", "amd", "radeon", "intel", "arc", "snap", "qualcomm", "snapdragon",
+            "nvidia",
+            "amd",
+            "radeon",
+            "intel",
+            "arc",
+            "snap",
+            "qualcomm",
+            "snapdragon",
         ];
         let mut result = Vec::new();
         let append = |name: &str, result: &mut Vec<String>| {
@@ -184,10 +191,7 @@ mod platform_impl {
     }
 
     fn from_sysfs_drm() -> Option<String> {
-        let paths: Vec<PathBuf> = glob::glob("/sys/class/drm/card*")
-            .ok()?
-            .flatten()
-            .collect();
+        let paths: Vec<PathBuf> = glob::glob("/sys/class/drm/card*").ok()?.flatten().collect();
         let excluded: HashMap<&str, bool> = [
             ("virtio-pci", true),
             ("virtio_gpu", true),
@@ -233,17 +237,31 @@ mod platform_impl {
                 }
             }
             let mapped = match driver {
-                "vc4" | "vc4-drm" => std::borrow::Cow::<str>::Borrowed("Broadcom VideoCore IV/VI (Raspberry Pi)"),
-                "v3d" | "v3d-drm" => std::borrow::Cow::<str>::Borrowed("Broadcom V3D (Raspberry Pi 4/5)"),
-                "msm" | "msm_drm" => std::borrow::Cow::<str>::Borrowed("Qualcomm Adreno (Unknown Model)"),
+                "vc4" | "vc4-drm" => {
+                    std::borrow::Cow::<str>::Borrowed("Broadcom VideoCore IV/VI (Raspberry Pi)")
+                }
+                "v3d" | "v3d-drm" => {
+                    std::borrow::Cow::<str>::Borrowed("Broadcom V3D (Raspberry Pi 4/5)")
+                }
+                "msm" | "msm_drm" => {
+                    std::borrow::Cow::<str>::Borrowed("Qualcomm Adreno (Unknown Model)")
+                }
                 "panfrost" => std::borrow::Cow::<str>::Borrowed("ARM Mali (Panfrost)"),
                 "lima" => std::borrow::Cow::<str>::Borrowed("ARM Mali (Lima)"),
-                "sun4i-drm" | "sunxi-drm" => std::borrow::Cow::<str>::Borrowed("Allwinner Display Engine"),
+                "sun4i-drm" | "sunxi-drm" => {
+                    std::borrow::Cow::<str>::Borrowed("Allwinner Display Engine")
+                }
                 "tegra" => std::borrow::Cow::<str>::Borrowed("NVIDIA Tegra"),
-                "ast" => std::borrow::Cow::<str>::Borrowed("ASPEED Technology, Inc. ASPEED Graphics Family"),
-                "i915" | "i915-drm" => std::borrow::Cow::<str>::Borrowed("Intel Integrated Graphics"),
+                "ast" => std::borrow::Cow::<str>::Borrowed(
+                    "ASPEED Technology, Inc. ASPEED Graphics Family",
+                ),
+                "i915" | "i915-drm" => {
+                    std::borrow::Cow::<str>::Borrowed("Intel Integrated Graphics")
+                }
                 "mgag200" => std::borrow::Cow::<str>::Borrowed("Matrox G200 Series"),
-                _ if !driver.is_empty() => std::borrow::Cow::Owned(format!("Direct Render Manager {driver}")),
+                _ if !driver.is_empty() => {
+                    std::borrow::Cow::Owned(format!("Direct Render Manager {driver}"))
+                }
                 _ => continue,
             };
             result.push(mapped.to_string());
@@ -260,11 +278,11 @@ mod platform_impl {
     }
 
     fn is_drm_card_path(path: &Path) -> bool {
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .is_some_and(|s| {
-                s.starts_with("card") && !s.contains('-') && s.chars().skip(4).all(|c| c.is_ascii_digit())
-            })
+        path.file_name().and_then(|s| s.to_str()).is_some_and(|s| {
+            s.starts_with("card")
+                && !s.contains('-')
+                && s.chars().skip(4).all(|c| c.is_ascii_digit())
+        })
     }
 
     fn is_excluded_sysfs_name(name: &str) -> bool {
@@ -487,12 +505,16 @@ mod platform_impl {
 
     fn read_sysfs_uint(path: std::path::PathBuf) -> Result<u64, String> {
         let data = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        data.trim().parse().map_err(|e: std::num::ParseIntError| e.to_string())
+        data.trim()
+            .parse()
+            .map_err(|e: std::num::ParseIntError| e.to_string())
     }
 
     fn read_sysfs_float(path: std::path::PathBuf) -> Result<f64, String> {
         let data = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        data.trim().parse().map_err(|e: std::num::ParseFloatError| e.to_string())
+        data.trim()
+            .parse()
+            .map_err(|e: std::num::ParseFloatError| e.to_string())
     }
 }
 
@@ -503,7 +525,7 @@ mod platform_impl {
     use super::DetailedGpu;
     use crate::nvidia_smi;
     use windows::Win32::Graphics::Dxgi::{
-        CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ADAPTER_DESC1,
+        CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG_SOFTWARE,
     };
 
     fn dxgi_adapters() -> Vec<DXGI_ADAPTER_DESC1> {
@@ -587,8 +609,11 @@ mod platform_impl {
     }
 
     pub fn gpu_name() -> Option<String> {
-        format_gpu_name_list(dxgi_gpu_names())
-            .or_else(|| nvidia_smi::gpu_models().ok().and_then(|m| m.first().cloned()))
+        format_gpu_name_list(dxgi_gpu_names()).or_else(|| {
+            nvidia_smi::gpu_models()
+                .ok()
+                .and_then(|m| m.first().cloned())
+        })
     }
 
     pub fn detailed_gpu() -> Result<Vec<DetailedGpu>, String> {
@@ -619,6 +644,14 @@ mod platform_impl {
     use std::process::Command;
 
     pub fn gpu_name() -> Option<String> {
+        // `system_profiler` is slow and allocates a large output buffer; the
+        // model list is static, so detect it once per process.
+        // `system_profiler` 慢且输出较大；型号是静态信息，进程内只检测一次。
+        static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        CACHE.get_or_init(detect_gpu_name).clone()
+    }
+
+    fn detect_gpu_name() -> Option<String> {
         let out = Command::new("system_profiler")
             .arg("SPDisplaysDataType")
             .output()
