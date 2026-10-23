@@ -55,6 +55,12 @@ pub fn execute_file_op(op: &str, args: &Value) -> Result<Value, String> {
             write_text(path, &content)
         }
         "chmod" => chmod_path(args),
+        "chown" => chown_path(args),
+        "copy" => {
+            let from = arg_string(args, "from")?;
+            let to = arg_string(args, "to")?;
+            copy_path(&from, &to)
+        }
         "search" => search_files(args),
         "trash_list" => trash_list(),
         "trash_restore" => trash_restore(arg_string(args, "trash_id")?),
@@ -110,7 +116,14 @@ fn data_home() -> PathBuf {
 }
 
 fn trash_root() -> PathBuf {
-    data_home().join(".sakuio").join("trash")
+    let primary = data_home().join(".sakuio").join("trash");
+    if fs::create_dir_all(&primary).is_ok() {
+        return primary;
+    }
+    // HOME may be unwritable (system service, sandboxed agent, read-only
+    // container). Fall back to the platform temp directory so deletion still
+    // works instead of failing before touching the source file.
+    std::env::temp_dir().join("sakuio-trash")
 }
 
 fn list_roots() -> Result<Value, String> {
@@ -231,7 +244,7 @@ fn trash_move(path: PathBuf) -> Result<Value, String> {
         .unwrap_or("item")
         .to_string();
     let dest = trash.join(format!("{id}_{name}"));
-    fs::rename(&path, &dest).map_err(|e| e.to_string())?;
+    move_entry(&path, &dest)?;
     fs::write(
         trash.join(format!("{id}.origin")),
         path.to_string_lossy().as_bytes(),
@@ -302,7 +315,7 @@ fn trash_restore(trash_id: String) -> Result<Value, String> {
     if dst.exists() {
         return Err("restore target already exists".into());
     }
-    fs::rename(&payload, &dst).map_err(|e| e.to_string())?;
+    move_entry(&payload, &dst)?;
     let _ = fs::remove_file(&origin_file);
     Ok(json!({ "restored": true, "path": dst.to_string_lossy() }))
 }
@@ -323,23 +336,128 @@ fn trash_empty() -> Result<Value, String> {
     Ok(json!({ "emptied": true }))
 }
 
+fn copy_path(from: &str, to: &str) -> Result<Value, String> {
+    let src = resolve_path(from)?;
+    let dst = resolve_path(to)?;
+    if dst.starts_with(&src) {
+        return Err("cannot copy a directory into itself".into());
+    }
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    copy_entry(&src, &dst)?;
+    Ok(json!({ "copied": true }))
+}
+
+fn copy_entry(src: &Path, dst: &Path) -> Result<(), String> {
+    let meta = fs::symlink_metadata(src).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    if meta.file_type().is_symlink() {
+        use std::os::unix::fs::symlink;
+        let target = fs::read_link(src).map_err(|e| e.to_string())?;
+        if dst.exists() {
+            remove_path_all(dst)?;
+        }
+        return symlink(target, dst).map_err(|e| e.to_string());
+    }
+    if meta.is_dir() {
+        fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+        for entry in fs::read_dir(src).map_err(|e| e.to_string())?.flatten() {
+            let name = entry.file_name();
+            copy_entry(&entry.path(), &dst.join(name))?;
+        }
+        copy_permissions(src, dst);
+        return Ok(());
+    }
+    fs::copy(src, dst).map_err(|e| e.to_string())?;
+    copy_permissions(src, dst);
+    Ok(())
+}
+
+fn copy_permissions(src: &Path, dst: &Path) {
+    if let Ok(meta) = fs::metadata(src) {
+        let _ = fs::set_permissions(dst, meta.permissions());
+    }
+}
+
 fn move_path(from: &str, to: &str) -> Result<Value, String> {
     let src = resolve_path(from)?;
     let dst = resolve_path(to)?;
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    fs::rename(&src, &dst).map_err(|e| e.to_string())?;
+    move_entry(&src, &dst)?;
     Ok(json!({ "moved": true }))
+}
+
+/// Rename first; if source and destination are on different filesystems,
+/// copy recursively and only then remove the source.
+fn move_entry(src: &Path, dst: &Path) -> Result<(), String> {
+    match fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(rename_error) => {
+            copy_entry(src, dst).map_err(|copy_error| {
+                format!("rename failed: {rename_error}; copy fallback failed: {copy_error}")
+            })?;
+            remove_path_all(src)
+        }
+    }
 }
 
 fn chmod_path(args: &Value) -> Result<Value, String> {
     let path = resolve_path(&arg_path(args, "path")?)?;
     let mode_str = arg_string(args, "mode")?;
-    let mode = u32::from_str_radix(mode_str.trim_start_matches('0'), 8)
-        .map_err(|_| "invalid mode".to_string())?;
+    let mode_digits = mode_str.strip_prefix("0o").unwrap_or(&mode_str);
+    let mode = u32::from_str_radix(mode_digits, 8).map_err(|_| "invalid mode".to_string())?;
     apply_mode(&path, mode)?;
     Ok(json!({ "mode": format!("{:o}", mode) }))
+}
+
+#[cfg(unix)]
+fn chown_path(args: &Value) -> Result<Value, String> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = resolve_path(&arg_path(args, "path")?)?;
+    let owner = args.get("owner").and_then(Value::as_str).unwrap_or("").trim();
+    let group = args.get("group").and_then(Value::as_str).unwrap_or("").trim();
+    let uid = resolve_id(owner, "/etc/passwd")?;
+    let gid = resolve_id(group, "/etc/group")?;
+    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+    let uid = uid.map(|value| value as libc::uid_t).unwrap_or(libc::uid_t::MAX);
+    let gid = gid.map(|value| value as libc::gid_t).unwrap_or(libc::gid_t::MAX);
+    let result = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(json!({ "chown": true }))
+}
+
+#[cfg(unix)]
+fn resolve_id(value: &str, database: &str) -> Result<Option<u32>, String> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().all(|ch| ch.is_ascii_digit()) {
+        return value.parse::<u32>().map(Some).map_err(|e| e.to_string());
+    }
+    let data = fs::read_to_string(database).map_err(|e| e.to_string())?;
+    for line in data.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.first().copied() == Some(value) {
+            return fields
+                .get(2)
+                .ok_or_else(|| format!("invalid entry for {value}"))
+                .and_then(|id| id.parse::<u32>().map_err(|e| e.to_string()))
+                .map(Some);
+        }
+    }
+    Err(format!("unknown user or group: {value}"))
+}
+
+#[cfg(not(unix))]
+fn chown_path(_args: &Value) -> Result<Value, String> {
+    Err("chown is not supported on this platform".into())
 }
 
 fn apply_mode(path: &Path, mode: u32) -> Result<(), String> {
@@ -353,22 +471,11 @@ fn apply_mode(path: &Path, mode: u32) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
         let readonly = mode & 0o200 == 0;
         let meta = fs::metadata(path).map_err(|e| e.to_string())?;
-        let mut attrs = meta.file_attributes();
-        if readonly {
-            attrs |= 0x1;
-        } else {
-            attrs &= !0x1;
-        }
-        std::process::Command::new("attrib")
-            .arg(if readonly { "+R" } else { "-R" })
-            .arg(path)
-            .status()
-            .map_err(|e| e.to_string())?;
-        let _ = attrs;
-        Ok(())
+        let mut permissions = meta.permissions();
+        permissions.set_readonly(readonly);
+        fs::set_permissions(path, permissions).map_err(|e| e.to_string())
     }
 }
 
@@ -435,4 +542,48 @@ fn write_text(raw: String, content: &str) -> Result<Value, String> {
     file.write_all(content.as_bytes())
         .map_err(|e| e.to_string())?;
     Ok(json!({ "written": true }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "sakuio-fs-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&root).expect("temp root");
+        root
+    }
+
+    #[test]
+    fn copy_keeps_source_and_copies_contents() {
+        let root = temp_root("copy");
+        let src = root.join("source");
+        let dst = root.join("destination");
+        fs::create_dir_all(&src).expect("source dir");
+        fs::write(src.join("file.txt"), b"payload").expect("source file");
+        copy_path(src.to_str().unwrap(), dst.to_str().unwrap()).expect("copy");
+        assert_eq!(fs::read(dst.join("file.txt")).expect("copied file"), b"payload");
+        assert!(src.join("file.txt").is_file(), "copy must not remove source");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn chmod_accepts_leading_zeroes() {
+        #[cfg(unix)]
+        {
+            let root = temp_root("chmod");
+            let file = root.join("file.txt");
+            fs::write(&file, b"x").expect("file");
+            chmod_path(&serde_json::json!({ "path": file, "mode": "0000" })).expect("chmod 0000");
+            chmod_path(&serde_json::json!({ "path": file, "mode": "0644" })).expect("chmod 0644");
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
 }
