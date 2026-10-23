@@ -483,6 +483,7 @@ fn resolve_user(value: &str) -> Result<Option<u32>, String> {
     Ok(Some(unsafe { (*entry).pw_uid }))
 }
 
+#[cfg(unix)]
 fn resolve_group(value: &str) -> Result<Option<u32>, String> {
     use std::ffi::CString;
     if value.is_empty() {

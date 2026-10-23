@@ -1345,7 +1345,7 @@ dependencies = [
 
 [[package]]
 name = "sakuio-board"
-version = "0.0.2"
+version = "0.0.4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1361,7 +1361,7 @@ dependencies = [
 
 [[package]]
 name = "sakuio-protocol"
-version = "0.0.2"
+version = "0.0.4"
 dependencies = [
  "bytes",
  "cbor4ii",
