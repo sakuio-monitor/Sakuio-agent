@@ -1,5 +1,4 @@
 use std::net::{TcpStream, ToSocketAddrs};
-#[cfg(unix)]
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -49,45 +48,126 @@ fn measure_icmp(target: &str) -> Result<i64, String> {
     measure_with_retries("icmp", target, icmp_once)
 }
 
+fn ping_binary() -> &'static str {
+    if cfg!(windows) {
+        return "ping";
+    }
+    for candidate in ["/sbin/ping", "/bin/ping", "/usr/bin/ping"] {
+        if std::path::Path::new(candidate).exists() {
+            return candidate;
+        }
+    }
+    "ping"
+}
+
+fn bsd_ping() -> bool {
+    cfg!(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))
+}
+
+fn ping_args(host: &str, timeout: Duration) -> Vec<String> {
+    if cfg!(windows) {
+        let mut args = vec!["-n".to_string(), "1".to_string(), "-w".to_string(), timeout.as_millis().to_string()];
+        if host.contains(':') {
+            args.insert(0, "-6".to_string());
+        } else {
+            args.insert(0, "-4".to_string());
+        }
+        args.push(host.to_string());
+        return args;
+    }
+    if bsd_ping() {
+        return vec![
+            "-c".into(), "1".into(), "-W".into(),
+            timeout.as_millis().to_string(), host.into(),
+        ];
+    }
+    // Linux / BusyBox: -W is seconds, while -w is the overall deadline.
+    let seconds = timeout.as_secs().max(1).to_string();
+    let deadline = (timeout.as_secs() + 2).to_string();
+    vec![
+        "-c".into(), "1".into(), "-W".into(), seconds,
+        "-w".into(), deadline, host.into(),
+    ]
+}
+
+fn parse_latency(text: &str) -> Option<i64> {
+    for line in text.lines() {
+        let lower = line.to_ascii_lowercase();
+        let Some((index, marker_len)) = ["time=", "time<", "时间=", "时间<", "時間=", "時間<"]
+            .iter()
+            .find_map(|needle| {
+                lower
+                    .find(needle)
+                    .or_else(|| line.find(needle))
+                    .map(|index| (index, needle.len()))
+            })
+        else {
+            continue;
+        };
+        let mut number = line[index + marker_len..].trim_start();
+        if let Some(value) = number.strip_prefix('<') {
+            number = value;
+        }
+        let ms: String = number
+            .chars()
+            .take_while(|c| *c == '.' || c.is_ascii_digit())
+            .collect();
+        if let Ok(value) = ms.parse::<f64>() {
+            return Some(value.round().max(0.0) as i64);
+        }
+    }
+    // Windows may localize "time="; the numeric suffix is still ASCII.
+    for line in text.lines() {
+        let Some(ms_index) = line.to_ascii_lowercase().find("ms") else {
+            continue;
+        };
+        let prefix = &line[..ms_index];
+        let Some(separator) = prefix.rfind(['=', '<']) else { continue; };
+        let number = prefix[separator + 1..].trim();
+        let numeric: String = number.chars().take_while(|c| *c == '.' || c.is_ascii_digit()).collect();
+        if let Ok(value) = numeric.parse::<f64>() {
+            return Some(value.round().max(0.0) as i64);
+        }
+    }
+    // Linux/macOS summary line: rtt min/avg/max/mdev = 1.2/2.3/3.4/0.5 ms
+    for line in text.lines() {
+        if !(line.contains("round-trip") || line.contains("rtt") || line.contains("平均")) {
+            continue;
+        }
+        let Some(part) = line.split('=').nth(1) else { continue; };
+        let avg = part.split('/').nth(1).unwrap_or("").trim();
+        let numeric: String = avg.chars().take_while(|c| *c == '.' || c.is_ascii_digit()).collect();
+        if let Ok(value) = numeric.parse::<f64>() {
+            return Some(value.round().max(0.0) as i64);
+        }
+    }
+    None
+}
+
 fn icmp_once(target: &str) -> Result<i64, String> {
     let host = strip_host_port(target);
-    #[cfg(unix)]
+    let mut command = Command::new(ping_binary());
+    command.args(ping_args(&host, TIMEOUT));
+    #[cfg(windows)]
     {
-        let timeout_ms = TIMEOUT.as_millis().to_string();
-        let out = Command::new("/sbin/ping")
-            .args(["-c", "1", "-W", &timeout_ms, &host])
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            return Err("ping failed".into());
-        }
-        let text = String::from_utf8_lossy(&out.stdout);
-        for line in text.lines() {
-            if line.contains("time=") {
-                if let Some(idx) = line.find("time=") {
-                    let rest = &line[idx + 5..];
-                    let ms_str: String = rest.chars().take_while(|c| *c == '.' || c.is_ascii_digit()).collect();
-                    if let Ok(ms) = ms_str.parse::<f64>() {
-                        return Ok(ms.round() as i64);
-                    }
-                }
-            }
-            if line.contains("round-trip") {
-                if let Some(part) = line.split('=').nth(1) {
-                    let avg = part.split('/').nth(1).unwrap_or("").trim();
-                    if let Ok(ms) = avg.parse::<f64>() {
-                        return Ok(ms.round() as i64);
-                    }
-                }
-            }
-        }
-        return Err("parse ping output failed".into());
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
     }
-    #[cfg(not(unix))]
-    {
-        let _ = host;
-        Err("icmp not supported on this platform".into())
+    let out = command.output().map_err(|error| format!("启动 ping 失败：{error}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "ping 失败：{}",
+            String::from_utf8_lossy(&out.stderr).chars().take(160).collect::<String>()
+        ));
     }
+    let text = String::from_utf8_lossy(&out.stdout);
+    parse_latency(&text).ok_or_else(|| "解析 ping 输出失败".to_string())
 }
 
 fn measure_tcp(target: &str) -> Result<i64, String> {
@@ -152,4 +232,46 @@ fn split_host_port(target: &str, default_port: &str) -> (String, String) {
         target.trim_matches('[').trim_matches(']').to_string(),
         default_port.to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_linux_output() {
+        let text = "64 bytes from 1.1.1.1: icmp_seq=1 ttl=57 time=12.4 ms";
+        assert_eq!(parse_latency(text), Some(12));
+    }
+
+    #[test]
+    fn parses_macos_output() {
+        let text = "64 bytes from 1.1.1.1: icmp_seq=0 ttl=57 time=8.123 ms";
+        assert_eq!(parse_latency(text), Some(8));
+    }
+
+    #[test]
+    fn parses_windows_output() {
+        let text = "Reply from 1.1.1.1: bytes=32 time=15ms TTL=57";
+        assert_eq!(parse_latency(text), Some(15));
+        let localised = "来自 1.1.1.1 的回复: 字节=32 时间=16ms TTL=57";
+        assert_eq!(parse_latency(localised), Some(16));
+    }
+
+    #[test]
+    fn parses_summary_only_output() {
+        let text = "rtt min/avg/max/mdev = 10.1/12.2/14.3/0.5 ms";
+        assert_eq!(parse_latency(text), Some(10));
+    }
+
+    #[test]
+    fn linux_uses_seconds_for_timeout() {
+        let args = ping_args("1.1.1.1", Duration::from_secs(3));
+        assert!(args.contains(&"-W".to_string()));
+        if bsd_ping() {
+            assert!(args.contains(&"3000".to_string()));
+        } else {
+            assert!(args.contains(&"3".to_string()));
+        }
+    }
 }
