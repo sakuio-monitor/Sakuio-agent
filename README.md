@@ -64,12 +64,17 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -e wss://panel-b.example.co
 
 ## Alpine / OpenRC
 
-Alpine 需要先安装 bash 和 curl：
+脚本是 POSIX `sh`，Alpine 自带 `sh` 和 `curl` 即可直接安装，不需要 bash：
 
-```bash
-apk add --no-cache bash curl ca-certificates
+```sh
 curl -fsSL https://raw.githubusercontent.com/sakuio-monitor/Sakuio-agent/main/install.sh \
-  | sudo bash -s -- -e wss://panel.example.com -t <token>
+  | sudo sh -s -- -e wss://panel.example.com -t <token>
+```
+
+如系统没有 curl，可先安装：
+
+```sh
+apk add --no-cache curl ca-certificates
 ```
 
 脚本会自动识别 OpenRC，并写入 `/etc/init.d/sakuio-agent[-N]`。
