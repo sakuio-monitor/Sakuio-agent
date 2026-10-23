@@ -158,9 +158,90 @@ fn first_usable_shell() -> Option<String> {
     None
 }
 
+#[cfg(windows)]
+fn find_on_path(name: &str) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join(name);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn version_key(name: &str) -> Vec<u32> {
+    name.split(|ch: char| !ch.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u32>().ok())
+        .collect()
+}
+
+/// PowerShell 7+ (`pwsh.exe`), newest installed copy first.
+#[cfg(windows)]
+fn find_pwsh() -> Option<String> {
+    let mut candidates: Vec<(Vec<u32>, String)> = Vec::new();
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        let root = std::path::PathBuf::from(program_files).join("PowerShell");
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                if name.contains("preview") {
+                    continue;
+                }
+                let executable = entry.path().join("pwsh.exe");
+                if executable.is_file() {
+                    candidates.push((
+                        version_key(&name),
+                        executable.to_string_lossy().into_owned(),
+                    ));
+                }
+            }
+        }
+    }
+    candidates.sort_by(|left, right| right.0.cmp(&left.0));
+    if let Some((_, executable)) = candidates.into_iter().next() {
+        return Some(executable);
+    }
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let store = std::path::PathBuf::from(local_app_data)
+            .join("Microsoft")
+            .join("WindowsApps")
+            .join("pwsh.exe");
+        if store.is_file() {
+            return Some(store.to_string_lossy().into_owned());
+        }
+    }
+    find_on_path("pwsh.exe")
+}
+
+#[cfg(windows)]
+fn find_windows_powershell() -> Option<String> {
+    if let Some(system_root) = std::env::var_os("SystemRoot") {
+        let candidate = std::path::PathBuf::from(system_root)
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    find_on_path("powershell.exe")
+}
+
 fn default_shell() -> String {
     #[cfg(windows)]
     {
+        // Prefer PowerShell 7 (pwsh), then Windows PowerShell 5.1, and only
+        // fall back to cmd.exe when neither is installed.
+        if let Some(shell) = find_pwsh() {
+            return shell;
+        }
+        if let Some(shell) = find_windows_powershell() {
+            return shell;
+        }
         std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into())
     }
     #[cfg(not(windows))]
