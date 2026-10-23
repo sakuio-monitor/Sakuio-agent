@@ -220,11 +220,22 @@ impl AgentRunner {
             return;
         };
         match tokio::fs::write(path, new_token).await {
-            Ok(()) => tracing::info!(
-                node_uuid = %welcome.node_uuid,
-                state_path = %path,
-                "node token assigned by server, saved to state file"
-            ),
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = tokio::fs::set_permissions(
+                        path,
+                        std::fs::Permissions::from_mode(0o600),
+                    )
+                    .await;
+                }
+                tracing::info!(
+                    node_uuid = %welcome.node_uuid,
+                    state_path = %path,
+                    "node token assigned by server, saved to state file"
+                );
+            }
             Err(e) => tracing::error!(error = %e, path = %path, "failed to save assigned node token"),
         }
     }
