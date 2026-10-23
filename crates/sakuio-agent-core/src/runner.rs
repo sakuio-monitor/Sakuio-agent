@@ -6,10 +6,11 @@ use sakuio_agent_remote::{
 };
 use crate::update::{run_forced_update, BoardLinkSnapshot, RESTART_EXIT_CODE};
 use sakuio_protocol::{
-    AgentPingBatchParams, AgentPingParams, AgentUpdateParams, ConfigParams, ControlMessage, ControlOp, HelloParams,
+    AgentPingBatchParams, AgentPingParams, AgentPingResultParams, AgentUpdateParams, ConfigParams, ControlMessage, ControlOp, HelloParams,
     RemoteExecOpen, RemoteFileCommand, RemoteFileResult, RemoteShellOpen, RemoteStreamRead,
     RemoteStreamWrite, SyncCommandItem, SyncReqParams, SyncRespParams, TelemetryBatch, WelcomeParams,
-    METHOD_AGENT_PING, METHOD_AGENT_PING_BATCH, METHOD_AGENT_PING_RESULT, METHOD_AGENT_UPDATE, METHOD_REMOTE_EXEC,
+    METHOD_AGENT_PING, METHOD_AGENT_PING_BATCH, METHOD_AGENT_PING_BATCH_RESULT,
+    METHOD_AGENT_PING_RESULT, METHOD_AGENT_UPDATE, METHOD_REMOTE_EXEC,
     METHOD_REMOTE_EXEC_RESULT, METHOD_REMOTE_FILE,
     METHOD_REMOTE_FILE_RESULT, METHOD_REMOTE_SHELL, METHOD_REMOTE_STREAM_READ,
     METHOD_REMOTE_STREAM_WRITE,
@@ -75,6 +76,7 @@ impl AgentRunner {
                     "basic_info".into(),
                     "ping".into(),
                 "pingBatch".into(),
+                "pingBatchResult".into(),
                 ]
             } else {
                 vec![
@@ -82,6 +84,7 @@ impl AgentRunner {
                     "basic_info".into(),
                     "ping".into(),
                 "pingBatch".into(),
+                "pingBatchResult".into(),
                     "remote.file".into(),
                     "remote.shell".into(),
                     "remote.exec".into(),
@@ -236,6 +239,7 @@ impl AgentRunner {
                 "basic_info".into(),
                 "ping".into(),
                 "pingBatch".into(),
+                "pingBatchResult".into(),
                 "remote.file".into(),
                 "remote.shell".into(),
                 "remote.exec".into(),
@@ -464,16 +468,43 @@ impl AgentRunner {
         item: SyncCommandItem,
     ) -> anyhow::Result<()> {
         let params: AgentPingBatchParams = serde_json::from_value(item.payload)?;
-        for task in params.tasks {
-            self.spawn_ping(
-                ping_tx.clone(),
-                SyncCommandItem {
-                    cursor: item.cursor,
-                    method: METHOD_AGENT_PING.to_string(),
-                    payload: serde_json::to_value(task)?,
-                },
-            )?;
-        }
+        tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(8));
+            let mut results: Vec<AgentPingResultParams> = futures_util::stream::iter(params.tasks)
+                .map(|task| {
+                    let semaphore = semaphore.clone();
+                    async move {
+                        let _permit = semaphore.acquire_owned().await.ok()?;
+                        let ping_type = task.ping_type.clone();
+                        let target = task.target.clone();
+                        let task_id = task.task_id;
+                        let probe_type = ping_type.clone();
+                        let value = tokio::task::spawn_blocking(move || run_ping(&probe_type, &target))
+                            .await
+                            .unwrap_or(-1);
+                        Some(AgentPingResultParams {
+                            task_id,
+                            ping_type,
+                            value,
+                            finished_at: chrono::Utc::now().to_rfc3339(),
+                        })
+                    }
+                })
+                .buffer_unordered(8)
+                .filter_map(|result| async move { result })
+                .collect()
+                .await;
+            results.sort_by_key(|result| result.task_id);
+            let msg = ControlMessage::new(
+                ControlOp::CmdResult,
+                serde_json::json!({
+                    "method": METHOD_AGENT_PING_BATCH_RESULT,
+                    "results": results,
+                }),
+            );
+            let _ = ping_tx.send(msg);
+        });
         Ok(())
     }
 

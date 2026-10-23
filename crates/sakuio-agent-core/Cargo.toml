@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+futures-util.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 cbor4ii.workspace = true
