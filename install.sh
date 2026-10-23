@@ -151,21 +151,44 @@ case "$OS" in
   *) echo "error: unsupported OS: $OS" >&2; exit 1 ;;
 esac
 
+# Normalize https://ghfast.top to https://ghfast.top/https://github.com/...
+# so the proxy receives an absolute GitHub URL, matching the main installer.
+github_base() {
+  proxy="${1%/}"
+  case "$proxy" in
+    ""|https://github.com) printf '%s' "https://github.com" ;;
+    *"/https://github.com"|*"/http://github.com") printf '%s' "$proxy" ;;
+    *) printf '%s' "$proxy/https://github.com" ;;
+  esac
+}
+GITHUB_BASE="$(github_base "${GITHUB_PROXY:-}")"
+
 # ---- resolve latest version when not pinned ----
 if [ -z "$AGENT_VERSION" ]; then
-  LATEST_URL="${GITHUB_PROXY:-https://github.com}/sakuio-monitor/Sakuio-agent/releases/latest"
+  LATEST_URL="${GITHUB_BASE}/sakuio-monitor/Sakuio-agent/releases/latest"
   if command -v curl >/dev/null 2>&1; then
     AGENT_VERSION="$(curl -fsSL -o /dev/null -w '%{url_effective}' "$LATEST_URL" | sed 's|.*/tag/v||')"
   else
     AGENT_VERSION="$(wget -qO- --max-redirs=5 "$LATEST_URL" 2>/dev/null | sed 's|.*/tag/v||' || true)"
   fi
   case "$AGENT_VERSION" in
-    ""|*"$LATEST_URL"*) echo "error: failed to resolve latest version; pass --version" >&2; exit 1 ;;
+    *[!0-9.]*|"") AGENT_VERSION="" ;;
+  esac
+  if [ -z "$AGENT_VERSION" ]; then
+    # Some mirrors do not expose /releases/latest redirects; use the API.
+    if command -v curl >/dev/null 2>&1; then
+      AGENT_VERSION="$(curl -fsSL -H 'Accept: application/vnd.github+json' \
+        https://api.github.com/repos/sakuio-monitor/Sakuio-agent/releases/latest \
+        2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -1)"
+    fi
+  fi
+  case "$AGENT_VERSION" in
+    ""|*[!0-9.]*) echo "error: failed to resolve latest version; pass --version" >&2; exit 1 ;;
   esac
 fi
 
 ASSET="sakuio-agent-${OS}-${ARCH}"
-DOWNLOAD_URL="${GITHUB_PROXY:-https://github.com}/sakuio-monitor/Sakuio-agent/releases/download/v${AGENT_VERSION}/${ASSET}"
+DOWNLOAD_URL="${GITHUB_BASE}/sakuio-monitor/Sakuio-agent/releases/download/v${AGENT_VERSION}/${ASSET}"
 
 echo "==> downloading ${DOWNLOAD_URL}"
 mkdir -p "$INSTALL_DIR"
