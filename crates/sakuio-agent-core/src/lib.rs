@@ -5,4 +5,4 @@ mod runner;
 mod update;
 
 pub use runner::{AgentConfig, AgentRunner};
-pub use update::{run_update_loop, BoardLinkSnapshot, RESTART_EXIT_CODE};
+pub use update::{run_forced_update, run_update_loop, BoardLinkSnapshot, RESTART_EXIT_CODE};

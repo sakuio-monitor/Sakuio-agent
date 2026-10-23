@@ -299,7 +299,12 @@ fn install_asset(data: &[u8]) -> anyhow::Result<()> {
 
 /// 执行一次升级检查；返回是否安装了新版本（需要重启进程）。
 /// `snapshot` 为面板链路状态快照：断开连接时跳过本轮；区间上界约束升级目标。
-fn check_and_update(current_version: &str, repo: &str, snapshot: BoardLinkSnapshot) -> anyhow::Result<bool> {
+fn check_and_update(
+    current_version: &str,
+    repo: &str,
+    snapshot: BoardLinkSnapshot,
+    forced_target: Option<&str>,
+) -> anyhow::Result<bool> {
     info!("checking update...");
     cleanup_stale_update_files();
     if !snapshot.connected {
@@ -318,15 +323,28 @@ fn check_and_update(current_version: &str, repo: &str, snapshot: BoardLinkSnapsh
         );
         return Ok(false);
     };
-    let max_allowed = snapshot
-        .version_range
-        .and_then(|r| parse_version(&r.max));
+    let max_allowed = match forced_target {
+        Some(target) => Some(
+            parse_version(target)
+                .ok_or_else(|| anyhow!("invalid target version {target:?}"))?,
+        ),
+        None => snapshot
+            .version_range
+            .and_then(|r| parse_version(&r.max)),
+    };
 
     let client = http_client();
     let releases = fetch_releases(&client, repo)?;
     let asset_name = expected_asset_name();
     let candidate = match select_candidate(&releases, current, &asset_name, max_allowed) {
         Some(c) => c,
+        None if forced_target.is_some() => {
+            bail!(
+                "target version {} is not available (or is not newer than {})",
+                forced_target.unwrap_or_default(),
+                current_version
+            );
+        }
         None => {
             info!("current version {current_version} is up-to-date");
             return Ok(false);
@@ -347,6 +365,39 @@ fn check_and_update(current_version: &str, repo: &str, snapshot: BoardLinkSnapsh
         .with_context(|| format!("refusing to update to version {tag}"))?;
     install_asset(&data).with_context(|| format!("failed to install version {tag}"))?;
     Ok(true)
+}
+
+/// 面板手动触发的一次性更新。返回 true 表示已替换二进制，调用方应立即退出，
+/// 由服务管理器拉起新版本；false 表示当前已是目标版本或无需更新。
+pub async fn run_forced_update(
+    current_version: &str,
+    target_version: Option<String>,
+    repo: Option<String>,
+) -> anyhow::Result<bool> {
+    if cfg!(debug_assertions) {
+        bail!("debug build does not support forced self-update");
+    }
+    if is_container_agent() {
+        bail!("container agent cannot self-update; refresh the container image instead");
+    }
+    let target = target_version
+        .map(|value| value.trim().trim_start_matches(['v', 'V']).to_string())
+        .filter(|value| !value.is_empty());
+    if target.is_none() {
+        bail!("target version is required");
+    }
+    let repo = repo.unwrap_or_else(|| DEFAULT_REPO.to_string());
+    let snapshot = BoardLinkSnapshot {
+        connected: true,
+        version_range: None,
+    };
+    let current = current_version.to_string();
+    let target_for_task = target.clone();
+    tokio::task::spawn_blocking(move || {
+        check_and_update(&current, &repo, snapshot, target_for_task.as_deref())
+    })
+    .await
+    .context("forced update task join failed")?
 }
 
 /// 升级检查循环：每 6 小时检查一次；面板断开连接的轮次直接跳过。
@@ -377,7 +428,7 @@ pub async fn run_update_loop(
         let v = version.to_string();
         let r = repo.to_string();
         let snapshot = slot.read().map(|guard| guard.clone()).unwrap_or_default();
-        match tokio::task::spawn_blocking(move || check_and_update(&v, &r, snapshot)).await {
+        match tokio::task::spawn_blocking(move || check_and_update(&v, &r, snapshot, None)).await {
             Ok(Ok(true)) => true,
             Ok(Ok(false)) => false,
             Ok(Err(e)) => {
@@ -412,5 +463,56 @@ pub async fn run_update_loop(
             on_restart();
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn release(tag: &str) -> Release {
+        Release {
+            tag_name: tag.into(),
+            draft: false,
+            prerelease: false,
+            assets: vec![Asset {
+                name: "sakuio-agent-linux-amd64".into(),
+                size: 1,
+                digest: String::new(),
+                browser_download_url: "https://example.invalid/agent".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn parses_versions_with_prefix_and_metadata() {
+        assert_eq!(parse_version("v0.0.4"), Some((0, 0, 4)));
+        assert_eq!(parse_version("0.1.2-rc.1"), Some((0, 1, 2)));
+        assert_eq!(parse_version("bad"), None);
+    }
+
+    #[test]
+    fn selects_latest_release_within_target() {
+        let releases = vec![release("v0.0.3"), release("v0.0.4"), release("v0.0.5")];
+        let candidate = select_candidate(
+            &releases,
+            (0, 0, 2),
+            "sakuio-agent-linux-amd64",
+            Some((0, 0, 4)),
+        )
+        .expect("candidate");
+        assert_eq!(candidate.tag_name, "v0.0.4");
+    }
+
+    #[test]
+    fn ignores_current_and_older_versions() {
+        let releases = vec![release("v0.0.3"), release("v0.0.4")];
+        assert!(select_candidate(
+            &releases,
+            (0, 0, 4),
+            "sakuio-agent-linux-amd64",
+            Some((0, 0, 4)),
+        )
+        .is_none());
     }
 }

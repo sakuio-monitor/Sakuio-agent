@@ -4,12 +4,13 @@ use sakuio_agent_collect::run_ping;
 use sakuio_agent_remote::{
     execute_file_op, resolve_relay_url, run_relay_pump, ExecBridge, RelayMode, ShellBridge,
 };
-use crate::update::BoardLinkSnapshot;
+use crate::update::{run_forced_update, BoardLinkSnapshot, RESTART_EXIT_CODE};
 use sakuio_protocol::{
-    AgentPingParams, ConfigParams, ControlMessage, ControlOp, HelloParams, RemoteExecOpen, RemoteFileCommand,
-    RemoteFileResult, RemoteShellOpen, RemoteStreamRead, RemoteStreamWrite, SyncCommandItem,
-    SyncReqParams, SyncRespParams, TelemetryBatch, WelcomeParams, METHOD_AGENT_PING,
-    METHOD_AGENT_PING_RESULT, METHOD_REMOTE_EXEC, METHOD_REMOTE_EXEC_RESULT, METHOD_REMOTE_FILE,
+    AgentPingParams, AgentUpdateParams, ConfigParams, ControlMessage, ControlOp, HelloParams,
+    RemoteExecOpen, RemoteFileCommand, RemoteFileResult, RemoteShellOpen, RemoteStreamRead,
+    RemoteStreamWrite, SyncCommandItem, SyncReqParams, SyncRespParams, TelemetryBatch, WelcomeParams,
+    METHOD_AGENT_PING, METHOD_AGENT_PING_RESULT, METHOD_AGENT_UPDATE, METHOD_REMOTE_EXEC,
+    METHOD_REMOTE_EXEC_RESULT, METHOD_REMOTE_FILE,
     METHOD_REMOTE_FILE_RESULT, METHOD_REMOTE_SHELL, METHOD_REMOTE_STREAM_READ,
     METHOD_REMOTE_STREAM_WRITE,
 };
@@ -316,6 +317,8 @@ impl AgentRunner {
                     *command_cursor = (*command_cursor).max(item.cursor);
                     if item.method == METHOD_AGENT_PING {
                         self.spawn_ping(ping_tx.clone(), item)?;
+                    } else if item.method == METHOD_AGENT_UPDATE {
+                        self.spawn_agent_update(item.payload)?;
                     } else if item.method == METHOD_REMOTE_FILE {
                         self.spawn_remote_file(ping_tx.clone(), item)?;
                     } else if item.method == METHOD_REMOTE_SHELL {
@@ -343,6 +346,8 @@ impl AgentRunner {
                         payload,
                     };
                     self.spawn_ping(ping_tx.clone(), item)?;
+                } else if method == METHOD_AGENT_UPDATE {
+                    self.spawn_agent_update(payload)?;
                 } else if method == METHOD_REMOTE_FILE {
                     let item = SyncCommandItem {
                         cursor: 0,
@@ -385,6 +390,28 @@ impl AgentRunner {
             }
         }
         Ok((*command_cursor, new_interval))
+    }
+
+    fn spawn_agent_update(&self, payload: serde_json::Value) -> anyhow::Result<()> {
+        let params: AgentUpdateParams = serde_json::from_value(payload)
+            .map_err(|e| anyhow::anyhow!("invalid agent update payload: {e}"))?;
+        let current = self.config.agent_version.clone();
+        tokio::spawn(async move {
+            tracing::info!(
+                current = %current,
+                target = ?params.target_version,
+                "board requested immediate agent update"
+            );
+            match run_forced_update(&current, params.target_version, None).await {
+                Ok(true) => {
+                    tracing::info!("agent update installed; exiting for service manager restart");
+                    std::process::exit(RESTART_EXIT_CODE);
+                }
+                Ok(false) => tracing::warn!("agent update skipped: target version is not newer"),
+                Err(error) => tracing::error!(error = %error, "agent update failed"),
+            }
+        });
+        Ok(())
     }
 
     fn spawn_ping(

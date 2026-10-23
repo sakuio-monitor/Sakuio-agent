@@ -10,7 +10,6 @@ sysinfo.workspace = true
 regex.workspace = true
 parking_lot.workspace = true
 once_cell.workspace = true
-netstat2.workspace = true
 raw-cpuid.workspace = true
 ureq.workspace = true
 serde.workspace = true
@@ -20,6 +19,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 if-addrs = "0.15"
 quick-xml = { version = "0.37", features = ["serialize"] }
 glob = "0.3"
+
+[target.'cfg(not(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly")))'.dependencies]
+netstat2.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

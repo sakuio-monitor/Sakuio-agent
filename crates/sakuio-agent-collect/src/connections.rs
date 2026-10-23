@@ -77,6 +77,7 @@ fn count_proc_net_file(path: &str) -> Result<usize, String> {
     Ok(count)
 }
 
+#[cfg(not(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly")))]
 fn netstat_fallback() -> Result<ConnectionsReport, String> {
     use netstat2::{get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo};
     let af = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
@@ -95,5 +96,30 @@ fn netstat_fallback() -> Result<ConnectionsReport, String> {
     Ok(ConnectionsReport {
         tcp: i32::try_from(tcp_count).unwrap_or(i32::MAX),
         udp: i32::try_from(udp_count).unwrap_or(i32::MAX),
+    })
+}
+
+#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+fn netstat_fallback() -> Result<ConnectionsReport, String> {
+    fn count(proto: &str) -> Result<i32, String> {
+        let output = std::process::Command::new("netstat")
+            .args(["-an", "-p", proto])
+            .output()
+            .map_err(|e| format!("netstat -p {proto}: {e}"))?;
+        if !output.status.success() {
+            return Err(format!("netstat -p {proto} exited with {}", output.status));
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        Ok(text
+            .lines()
+            .filter(|line| {
+                let line = line.trim();
+                !line.is_empty() && !line.starts_with("Active") && !line.starts_with("Proto")
+            })
+            .count() as i32)
+    }
+    Ok(ConnectionsReport {
+        tcp: count("tcp")?,
+        udp: count("udp")?,
     })
 }
