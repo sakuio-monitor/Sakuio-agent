@@ -126,6 +126,22 @@ fn trash_root() -> PathBuf {
     std::env::temp_dir().join("sakuio-trash")
 }
 
+#[cfg(windows)]
+fn list_roots() -> Result<Value, String> {
+    use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
+    let mask = unsafe { GetLogicalDrives() };
+    let mut roots = Vec::new();
+    for index in 0..26u32 {
+        if mask & (1 << index) == 0 {
+            continue;
+        }
+        let name = format!("{}:\\", (b'A' + index as u8) as char);
+        roots.push(json!({ "name": name, "path": name, "is_dir": true }));
+    }
+    Ok(json!(roots))
+}
+
+#[cfg(not(windows))]
 fn list_roots() -> Result<Value, String> {
     Ok(json!([{ "name": "/", "path": "/", "is_dir": true }]))
 }
@@ -360,6 +376,23 @@ fn copy_entry(src: &Path, dst: &Path) -> Result<(), String> {
         }
         return symlink(target, dst).map_err(|e| e.to_string());
     }
+    #[cfg(not(unix))]
+    if meta.file_type().is_symlink() {
+        // Windows symlinks/junctions may require privileges to create. Copy
+        // the target instead so file operations still work for normal users.
+        let target = fs::metadata(src).map_err(|e| e.to_string())?;
+        if target.is_dir() {
+            fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+            for entry in fs::read_dir(src).map_err(|e| e.to_string())?.flatten() {
+                copy_entry(&entry.path(), &dst.join(entry.file_name()))?;
+            }
+            copy_permissions(src, dst);
+            return Ok(());
+        }
+        fs::copy(src, dst).map_err(|e| e.to_string())?;
+        copy_permissions(src, dst);
+        return Ok(());
+    }
     if meta.is_dir() {
         fs::create_dir_all(dst).map_err(|e| e.to_string())?;
         for entry in fs::read_dir(src).map_err(|e| e.to_string())?.flatten() {
@@ -421,8 +454,8 @@ fn chown_path(args: &Value) -> Result<Value, String> {
     let path = resolve_path(&arg_path(args, "path")?)?;
     let owner = args.get("owner").and_then(Value::as_str).unwrap_or("").trim();
     let group = args.get("group").and_then(Value::as_str).unwrap_or("").trim();
-    let uid = resolve_id(owner, "/etc/passwd")?;
-    let gid = resolve_id(group, "/etc/group")?;
+    let uid = resolve_user(owner)?;
+    let gid = resolve_group(group)?;
     let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
     let uid = uid.map(|value| value as libc::uid_t).unwrap_or(libc::uid_t::MAX);
     let gid = gid.map(|value| value as libc::gid_t).unwrap_or(libc::gid_t::MAX);
@@ -434,25 +467,36 @@ fn chown_path(args: &Value) -> Result<Value, String> {
 }
 
 #[cfg(unix)]
-fn resolve_id(value: &str, database: &str) -> Result<Option<u32>, String> {
+fn resolve_user(value: &str) -> Result<Option<u32>, String> {
+    use std::ffi::CString;
     if value.is_empty() {
         return Ok(None);
     }
     if value.chars().all(|ch| ch.is_ascii_digit()) {
         return value.parse::<u32>().map(Some).map_err(|e| e.to_string());
     }
-    let data = fs::read_to_string(database).map_err(|e| e.to_string())?;
-    for line in data.lines() {
-        let fields: Vec<&str> = line.split(':').collect();
-        if fields.first().copied() == Some(value) {
-            return fields
-                .get(2)
-                .ok_or_else(|| format!("invalid entry for {value}"))
-                .and_then(|id| id.parse::<u32>().map_err(|e| e.to_string()))
-                .map(Some);
-        }
+    let name = CString::new(value).map_err(|e| e.to_string())?;
+    let entry = unsafe { libc::getpwnam(name.as_ptr()) };
+    if entry.is_null() {
+        return Err(format!("unknown user: {value}"));
     }
-    Err(format!("unknown user or group: {value}"))
+    Ok(Some(unsafe { (*entry).pw_uid }))
+}
+
+fn resolve_group(value: &str) -> Result<Option<u32>, String> {
+    use std::ffi::CString;
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().all(|ch| ch.is_ascii_digit()) {
+        return value.parse::<u32>().map(Some).map_err(|e| e.to_string());
+    }
+    let name = CString::new(value).map_err(|e| e.to_string())?;
+    let entry = unsafe { libc::getgrnam(name.as_ptr()) };
+    if entry.is_null() {
+        return Err(format!("unknown group: {value}"));
+    }
+    Ok(Some(unsafe { (*entry).gr_gid }))
 }
 
 #[cfg(not(unix))]
