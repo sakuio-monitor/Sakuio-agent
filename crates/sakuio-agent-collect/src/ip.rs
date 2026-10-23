@@ -89,28 +89,35 @@ pub fn ip_addresses(cfg: &CollectConfig) -> (String, String) {
 
 fn get_ipv4_address() -> Option<String> {
     const WEB_APIS: &[&str] = &[
+        "https://api.ipify.org?format=json",
+        "http://ipv4.ip.sb",
+        "https://edge-ip.html.zone/geo",
+        "https://vercel-ip.html.zone/geo",
         "https://www.visa.cn/cdn-cgi/trace",
         "https://www.qualcomm.cn/cdn-cgi/trace",
         "https://www.toutiao.com/stream/widget/local_weather/data/",
-        "https://edge-ip.html.zone/geo",
-        "https://vercel-ip.html.zone/geo",
-        "http://ipv4.ip.sb",
-        "https://api.ipify.org?format=json",
     ];
+    // Query all providers concurrently; the first valid answer wins. A slow or
+    // blocked provider no longer delays the others.
+    let (tx, rx) = std::sync::mpsc::channel();
     for api in WEB_APIS {
-        let Ok(resp) = IPV4_HTTP_CLIENT.get(*api).call() else {
-            continue;
-        };
-        let Ok(body) = resp.into_string() else {
-            continue;
-        };
-        if let Some(m) = RE_IPV4.find(&body) {
-                let ipv4 = m.as_str().to_string();
-                tracing::info!(ipv4 = %ipv4, "get ipv4 success");
-                return Some(ipv4);
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            if let Some(ipv4) = fetch_ipv4(api) {
+                let _ = tx.send(ipv4);
             }
+        });
     }
-    None
+    drop(tx);
+    rx.recv().ok()
+}
+
+fn fetch_ipv4(api: &str) -> Option<String> {
+    let resp = IPV4_HTTP_CLIENT.get(api).call().ok()?;
+    let body = resp.into_string().ok()?;
+    let ipv4 = RE_IPV4.find(&body)?.as_str().to_string();
+    tracing::info!(ipv4 = %ipv4, "get ipv4 success");
+    Some(ipv4)
 }
 
 fn get_ipv6_address() -> Option<String> {
@@ -120,20 +127,25 @@ fn get_ipv6_address() -> Option<String> {
         "https://ipv6.icanhazip.com",
         "http://api-ipv6.ip.sb/geoip",
     ];
+    let (tx, rx) = std::sync::mpsc::channel();
     for api in WEB_APIS {
-        let Ok(resp) = IPV6_HTTP_CLIENT.get(*api).call() else {
-            continue;
-        };
-        let Ok(body) = resp.into_string() else {
-            continue;
-        };
-        if let Some(m) = RE_IPV6.find(&body) {
-                let ipv6 = m.as_str().to_string();
-                tracing::info!(ipv6 = %ipv6, "get ipv6 success");
-                return Some(ipv6);
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            if let Some(ipv6) = fetch_ipv6(api) {
+                let _ = tx.send(ipv6);
             }
+        });
     }
-    None
+    drop(tx);
+    rx.recv().ok()
+}
+
+fn fetch_ipv6(api: &str) -> Option<String> {
+    let resp = IPV6_HTTP_CLIENT.get(api).call().ok()?;
+    let body = resp.into_string().ok()?;
+    let ipv6 = RE_IPV6.find(&body)?.as_str().to_string();
+    tracing::info!(ipv6 = %ipv6, "get ipv6 success");
+    Some(ipv6)
 }
 
 fn get_ip_from_interfaces(nic_names: &[String]) -> (String, String) {
