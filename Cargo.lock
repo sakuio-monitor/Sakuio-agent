@@ -1251,7 +1251,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "sakuio-agent"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "clap",
@@ -1265,7 +1265,7 @@ dependencies = [
 
 [[package]]
 name = "sakuio-agent-collect"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "chrono",
  "glob",
@@ -1291,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "sakuio-agent-core"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "cbor4ii",
@@ -1311,7 +1311,7 @@ dependencies = [
 
 [[package]]
 name = "sakuio-agent-remote"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -1328,7 +1328,7 @@ dependencies = [
 
 [[package]]
 name = "sakuio-agent-ws"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "async-trait",
  "cbor4ii",
@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "sakuio-board"
-version = "0.0.7"
+version = "0.0.11"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1363,7 +1363,7 @@ dependencies = [
 
 [[package]]
 name = "sakuio-protocol"
-version = "0.0.7"
+version = "0.0.11"
 dependencies = [
  "bytes",
  "cbor4ii",

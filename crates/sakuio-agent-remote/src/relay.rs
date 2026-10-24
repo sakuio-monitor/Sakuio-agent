@@ -2,6 +2,8 @@ use futures_util::{SinkExt, StreamExt};
 use std::path::Path;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 /// Derives the `ws(s)://host[:port]` base from the `-e` endpoint argument.
@@ -38,12 +40,14 @@ pub async fn run_relay_pump(
     token: &str,
     mode: RelayMode,
 ) -> anyhow::Result<Option<(String, i32)>> {
-    let url = if endpoint.contains('?') {
-        format!("{endpoint}&token={token}")
-    } else {
-        format!("{endpoint}?token={token}")
-    };
-    let (ws, _) = connect_async(&url).await?;
+    // The node token is sent as a header, not a query parameter, so proxy
+    // access logs do not contain a reusable remote-control credential.
+    let mut request = endpoint.into_client_request()?;
+    request.headers_mut().insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}"))?,
+    );
+    let (ws, _) = connect_async(request).await?;
     let (mut tx, mut rx) = ws.split();
 
     match mode {

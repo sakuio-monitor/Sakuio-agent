@@ -3,6 +3,8 @@ use async_trait::async_trait;
 use http::StatusCode;
 use sakuio_board::{BoardConnectInfo, BoardSession, BoardTransport, TransportError};
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::Connector;
 use tokio_tungstenite::tungstenite::Error as WsError;
 use url::Url;
@@ -134,22 +136,28 @@ impl BoardTransport for WsBoardTransport {
                 "token is not a 64-hex node token; trying auto discovery"
             );
         }
-        let mut url = self.endpoint.clone();
-        {
-            let mut pairs = url.query_pairs_mut();
-            pairs.clear();
-            pairs.append_pair("token", token);
-        }
-        let connect_result = if self.insecure_tls && url.scheme() == "wss" {
+        // Node token is a header, never a query string: proxy access logs must
+        // not contain a reusable agent credential.
+        let mut request = self
+            .endpoint
+            .as_str()
+            .into_client_request()
+            .map_err(|e| TransportError::Connect(e.to_string()))?;
+        request.headers_mut().insert(
+            "Authorization",
+            HeaderValue::from_str(&format!("Bearer {token}"))
+                .map_err(|e| TransportError::Connect(e.to_string()))?,
+        );
+        let connect_result = if self.insecure_tls && self.endpoint.scheme() == "wss" {
             tokio_tungstenite::connect_async_tls_with_config(
-                url.as_str(),
+                request,
                 None,
                 false,
                 Some(Self::dangerous_tls_connector()),
             )
             .await
         } else {
-            connect_async(url.as_str()).await
+            connect_async(request).await
         };
         let (socket, _resp) =
             connect_result.map_err(|e| TransportError::Connect(map_connect_error(e)))?;
